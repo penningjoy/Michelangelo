@@ -1,0 +1,68 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Michelangelo CLI: Explore",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "polymath_cli.main",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {
+        "UV_CACHE_DIR": ".uv-cache",
+        "POLYMATH_OPEN_BROWSER": "true"
+      },
+      "args": [
+        "explore",
+        "Attention Is All You Need",
+        "--premise",
+        "self-attention replaces recurrence as the core sequence modeling mechanism"
+      ]
+    },
+    {
+      "name": "Michelangelo CLI: Sessions",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "polymath_cli.main",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {
+        "UV_CACHE_DIR": ".uv-cache"
+      },
+      "args": ["sessions"]
+    },
+    {
+      "name": "Michelangelo API: Local Server",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {
+        "UV_CACHE_DIR": ".uv-cache",
+        "POLYMATH_STORAGE_DIR": ".polymath"
+      },
+      "args": [
+        "polymath_server.dev:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8765",
+        "--reload"
+      ]
+    },
+    {
+      "name": "Pytest",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {
+        "UV_CACHE_DIR": ".uv-cache"
+      },
+      "args": ["tests"]
+    }
+  ]
+}
+

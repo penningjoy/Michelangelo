@@ -1,0 +1,15 @@
+{
+  "name": "polymath-atlas",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "npm --prefix apps/web run dev",
+    "build": "npm --prefix apps/web run build",
+    "test": "npm --prefix apps/web run test",
+    "typecheck": "npm --prefix apps/web run typecheck",
+    "dev:web": "npm --prefix apps/web run dev",
+    "build:web": "npm --prefix apps/web run build",
+    "test:web": "npm --prefix apps/web run test",
+    "typecheck:web": "npm --prefix apps/web run typecheck"
+  }
+}
