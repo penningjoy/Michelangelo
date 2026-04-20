@@ -578,6 +578,61 @@ p {
   width: 220px;
 }
 
+.learning-card {
+  margin-top: var(--space-3);
+  border: 1px solid var(--hairline);
+  background: #fffdf9;
+  padding: var(--space-3);
+}
+
+.learning-card-copy {
+  font-size: 13px;
+  color: var(--ink-soft);
+  line-height: 1.45;
+}
+
+.learning-prompts {
+  margin: var(--space-3) 0 0;
+  padding-left: 1.25em;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font-family: var(--font-reading);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.learning-prompts details {
+  margin-top: 4px;
+}
+
+.learning-prompts summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-family: var(--font-ui);
+  font-size: 12px;
+}
+
+.learning-confidence {
+  margin-top: var(--space-3);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.learning-confidence input[type="range"] {
+  flex: 1;
+  padding: 0;
+}
+
+.learning-delta {
+  margin-top: var(--space-2);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
 .message.assistant .evidence-compass-bar {
   height: 4px;
 }
@@ -740,6 +795,26 @@ p {
   justify-content: space-between;
   align-items: center;
   gap: var(--space-3);
+}
+
+.composer-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.confidence-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.confidence-inline input[type="range"] {
+  width: 140px;
+  padding: 0;
 }
 
 .composer-status {

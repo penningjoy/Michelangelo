@@ -20,6 +20,7 @@ import type {
   SessionRecord,
   SourceArtifact
 } from "../lib/types";
+import { buildRecallDrill, type RecallPrompt } from "../lib/learning";
 import { parseResearchEventLine } from "../lib/ndjson";
 import { ConnectionsTray } from "./ConnectionsTray";
 import { ConceptCanvas } from "./ConceptCanvas";
@@ -32,6 +33,13 @@ type WorkspaceProps = {
 };
 
 type ConceptSpansByMessage = Record<string, ConceptSpanForClient[]>;
+type LearningByMessage = Record<string, LearningCheckpoint>;
+
+type LearningCheckpoint = {
+  preConfidence: number;
+  postConfidence: number | null;
+  prompts: RecallPrompt[];
+};
 
 export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
   const [apiKey, setApiKey] = useState("");
@@ -53,11 +61,14 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
   const [sentAt, setSentAt] = useState<number | null>(null);
   const [isLate, setIsLate] = useState(false);
   const [curatorWorking, setCuratorWorking] = useState(false);
+  const [preConfidence, setPreConfidence] = useState(60);
+  const [learningByMessage, setLearningByMessage] = useState<LearningByMessage>({});
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const hydratedRef = useRef(false);
   const currentAssistantIdRef = useRef<string | null>(null);
+  const preConfidenceByAssistantRef = useRef<Record<string, number>>({});
 
   // "Taking longer than usual" hint: if a send has been in flight for ≥25s,
   // flip isLate so the composer status can reassure the user.
@@ -156,6 +167,7 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
     setArtifacts(null);
     setLastTurnGist(null);
     setConceptSpans({});
+    setLearningByMessage({});
     setPrompt("");
     setStatus("");
     setErrorMessage(null);
@@ -195,6 +207,7 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
       createdAt: new Date().toISOString()
     };
     const assistantId = crypto.randomUUID();
+    preConfidenceByAssistantRef.current[assistantId] = preConfidence;
     currentAssistantIdRef.current = assistantId;
     const optimisticAssistant: ChatMessage = {
       id: assistantId,
@@ -240,6 +253,18 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
           );
         } else if (event.type === "artifacts") {
           setArtifacts(event.artifacts);
+          const id = currentAssistantIdRef.current;
+          if (id) {
+            const captured = preConfidenceByAssistantRef.current[id] ?? preConfidence;
+            setLearningByMessage((current) => ({
+              ...current,
+              [id]: {
+                preConfidence: captured,
+                postConfidence: null,
+                prompts: buildRecallDrill(event.artifacts)
+              }
+            }));
+          }
         } else if (event.type === "concept-spans") {
           const id = currentAssistantIdRef.current;
           if (id) {
@@ -276,7 +301,7 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
       setIsSending(false);
       setSentAt(null);
     }
-  }, [apiKey, canSend, prompt, session?.id]);
+  }, [apiKey, canSend, preConfidence, prompt, session?.id]);
 
   const onComposerKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -447,6 +472,17 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
                   message={message}
                   spans={conceptSpans[message.id] ?? []}
                   artifacts={isLastAssistant ? artifacts : null}
+                  learning={learningByMessage[message.id] ?? null}
+                  onPostConfidenceChange={(value) =>
+                    setLearningByMessage((current) => {
+                      const existing = current[message.id];
+                      if (!existing) return current;
+                      return {
+                        ...current,
+                        [message.id]: { ...existing, postConfidence: value }
+                      };
+                    })
+                  }
                   isThinking={
                     isSending && message.role === "assistant" && message.content.trim().length === 0
                   }
@@ -473,15 +509,28 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
             rows={4}
           />
           <div className={`composer-row${isSending ? " composer-row--busy" : ""}`}>
-            <span className="composer-status">
-              {isSending ? <span className="pulse-dot" aria-hidden /> : null}
-              {status || "Idle — Cmd/Ctrl+Enter to send."}
-              {isSending && isLate ? (
-                <span className="composer-late">
-                  &nbsp;— taking a moment; the model hasn't given up.
-                </span>
-              ) : null}
-            </span>
+            <div className="composer-meta">
+              <label className="confidence-inline">
+                <span>Current confidence</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={preConfidence}
+                  onChange={(event) => setPreConfidence(Number(event.target.value))}
+                />
+                <strong>{preConfidence}%</strong>
+              </label>
+              <span className="composer-status">
+                {isSending ? <span className="pulse-dot" aria-hidden /> : null}
+                {status || "Idle — Cmd/Ctrl+Enter to send."}
+                {isSending && isLate ? (
+                  <span className="composer-late">
+                    &nbsp;— taking a moment; the model hasn't given up.
+                  </span>
+                ) : null}
+              </span>
+            </div>
             <button
               className={isSending ? "send-btn send-btn--working" : "send-btn"}
               disabled={!canSend}
@@ -548,12 +597,16 @@ function MessageBubble({
   message,
   spans,
   artifacts,
+  learning,
+  onPostConfidenceChange,
   isThinking,
   isStreaming
 }: {
   message: ChatMessage;
   spans: ConceptSpanForClient[];
   artifacts: ResearchArtifacts | null;
+  learning: LearningCheckpoint | null;
+  onPostConfidenceChange(value: number): void;
   isThinking?: boolean;
   isStreaming?: boolean;
 }) {
@@ -596,6 +649,12 @@ function MessageBubble({
 
       {isAssistant && artifacts ? (
         <>
+          {learning ? (
+            <LearningCheckpointCard
+              checkpoint={learning}
+              onPostConfidenceChange={onPostConfidenceChange}
+            />
+          ) : null}
           <EvidenceCompass insights={artifacts.insights} />
           {artifacts.sources.length > 0 ? (
             <Endnotes sources={artifacts.sources} sourceOrder={sourceOrder} />
@@ -699,6 +758,57 @@ function AssistantProse({
     nodes.push(<span key="tail">{text.slice(cursor)}</span>);
   }
   return <>{nodes}</>;
+}
+
+function LearningCheckpointCard({
+  checkpoint,
+  onPostConfidenceChange
+}: {
+  checkpoint: LearningCheckpoint;
+  onPostConfidenceChange(value: number): void;
+}) {
+  const delta =
+    checkpoint.postConfidence == null ? null : checkpoint.postConfidence - checkpoint.preConfidence;
+
+  return (
+    <section className="learning-card">
+      <p className="eyebrow">Learning checkpoint</p>
+      <p className="learning-card-copy">
+        Quick recall and transfer prompts. Try to answer first, then expand to compare.
+      </p>
+      <ol className="learning-prompts">
+        {checkpoint.prompts.map((prompt) => (
+          <li key={prompt.id}>
+            <p>
+              <strong>{prompt.kind === "transfer" ? "Transfer" : "Recall"}:</strong>{" "}
+              {prompt.question}
+            </p>
+            <details>
+              <summary>Show sample answer</summary>
+              <p>{prompt.sampleAnswer}</p>
+            </details>
+          </li>
+        ))}
+      </ol>
+      <label className="learning-confidence">
+        <span>Confidence after review</span>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          value={checkpoint.postConfidence ?? checkpoint.preConfidence}
+          onChange={(event) => onPostConfidenceChange(Number(event.target.value))}
+        />
+        <strong>{checkpoint.postConfidence ?? checkpoint.preConfidence}%</strong>
+      </label>
+      {delta != null ? (
+        <p className="learning-delta">
+          Confidence shift: {delta > 0 ? "+" : ""}
+          {delta}% (before {checkpoint.preConfidence}%)
+        </p>
+      ) : null}
+    </section>
+  );
 }
 
 function Endnotes({
