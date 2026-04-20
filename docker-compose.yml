@@ -42,7 +42,7 @@ services:
       NEO4J_URI: bolt://graph:7687
       NEO4J_USER: neo4j
       NEO4J_PASSWORD: polymath-dev
-      MOCK_MODEL: "true"
+      MOCK_MODEL: "false"
       OPENAI_MODEL: gpt-5.2
     ports:
       - "3000:3000"

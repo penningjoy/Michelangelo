@@ -46,15 +46,24 @@ type ConceptOption = {
   mentionCount: number;
 };
 
-export function ConnectionsTray({ refreshKey }: { refreshKey: number }) {
+export function ConnectionsTray({
+  refreshKey,
+  curatorWorking
+}: {
+  refreshKey: number;
+  curatorWorking?: boolean;
+}) {
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [open, setOpen] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [enabled, setEnabled] = useState(true);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const [isFetching, setIsFetching] = useState(false);
+  const [hasFetchedOnce, setHasFetchedOnce] = useState(false);
 
   const fetchProposals = useCallback(async () => {
+    setIsFetching(true);
     try {
       const response = await fetch("/api/connections", { cache: "no-store" });
       if (!response.ok) {
@@ -66,6 +75,9 @@ export function ConnectionsTray({ refreshKey }: { refreshKey: number }) {
       setEnabled(true);
     } catch {
       setEnabled(false);
+    } finally {
+      setIsFetching(false);
+      setHasFetchedOnce(true);
     }
   }, []);
 
@@ -102,8 +114,15 @@ export function ConnectionsTray({ refreshKey }: { refreshKey: number }) {
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
       >
-        <span className="eyebrow">Connections</span>
-        <span className="connections-count">{proposals.length} proposed</span>
+        <span className="eyebrow">
+          Connections
+          {(curatorWorking || isFetching) ? (
+            <span className="pulse-dot" aria-hidden title="Curator working" />
+          ) : null}
+        </span>
+        <span className="connections-count">
+          {curatorWorking ? "curator thinking…" : `${proposals.length} proposed`}
+        </span>
         <span className="connections-caret" aria-hidden>
           {open ? "−" : "+"}
         </span>
@@ -118,8 +137,11 @@ export function ConnectionsTray({ refreshKey }: { refreshKey: number }) {
           ) : null}
           {proposals.length === 0 ? (
             <p className="muted connections-empty">
-              No proposed connections yet. The curator surfaces candidate links as your sessions
-              grow.
+              {curatorWorking
+                ? "The curator is weaving candidate links for your latest turn…"
+                : !hasFetchedOnce
+                ? "Loading proposals…"
+                : "No proposed connections right now. Run a turn, or add an edge by hand."}
             </p>
           ) : (
             proposals.map((proposal) => (

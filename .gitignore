@@ -1,4 +1,10 @@
 .env
+.env.local
+.env.*.local
+.env.development
+.env.production
+# Allow committed templates only:
+!.env.example
 node_modules/
 apps/*/node_modules/
 apps/web/.next/

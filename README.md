@@ -34,6 +34,9 @@ Open `http://localhost:3000`, enter an OpenAI API key, and start a research
 pass. For local smoke testing without model calls, use `sk-mock` as the key
 or set `MOCK_MODEL=true`.
 
+Do not commit real API keys. Copy [`.env.example`](./.env.example) to `.env` at the repo root
+(or use `apps/web/.env.local`) and set secrets only on your machine.
+
 The app stores:
 
 - sessions,

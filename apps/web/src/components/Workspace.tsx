@@ -49,11 +49,26 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
   const [titleDraft, setTitleDraft] = useState("");
   const [editingTitle, setEditingTitle] = useState(false);
   const [graphRefresh, setGraphRefresh] = useState(0);
+  const [isHydrating, setIsHydrating] = useState(false);
+  const [sentAt, setSentAt] = useState<number | null>(null);
+  const [isLate, setIsLate] = useState(false);
+  const [curatorWorking, setCuratorWorking] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const hydratedRef = useRef(false);
   const currentAssistantIdRef = useRef<string | null>(null);
+
+  // "Taking longer than usual" hint: if a send has been in flight for ≥25s,
+  // flip isLate so the composer status can reassure the user.
+  useEffect(() => {
+    if (!sentAt) {
+      setIsLate(false);
+      return;
+    }
+    const timeout = window.setTimeout(() => setIsLate(true), 25_000);
+    return () => window.clearTimeout(timeout);
+  }, [sentAt]);
 
   useEffect(() => {
     if (hydratedRef.current) return;
@@ -64,6 +79,7 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
 
     const savedSessionId = localStorage.getItem(SESSION_STORAGE);
     if (!savedSessionId) return;
+    setIsHydrating(true);
     (async () => {
       try {
         const response = await fetch(`/api/session/${encodeURIComponent(savedSessionId)}`);
@@ -93,6 +109,8 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
       } catch {
         localStorage.removeItem(SESSION_STORAGE);
         setErrorMessage("Could not restore your last session.");
+      } finally {
+        setIsHydrating(false);
       }
     })();
   }, []);
@@ -189,6 +207,7 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
     setPrompt("");
     setStatus("Starting research...");
     setIsSending(true);
+    setSentAt(Date.now());
 
     try {
       const response = await fetch("/api/research", {
@@ -230,7 +249,16 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
           throw new Error(event.message);
         } else if (event.type === "done") {
           setStatus("Artifacts updated.");
-          window.setTimeout(() => setGraphRefresh((n) => n + 1), 3500);
+          // Curator runs fire-and-forget on the server. Show a visible "working"
+          // state in the right rail until the refresh lands, so the user knows
+          // new connections/nodes may still be arriving.
+          setCuratorWorking(true);
+          window.setTimeout(() => {
+            setGraphRefresh((n) => n + 1);
+            // Leave a short tail so the "curator working" state is perceptible
+            // even on fast runs; ConnectionsTray will clear it when it refetches.
+            window.setTimeout(() => setCuratorWorking(false), 1200);
+          }, 3500);
         }
       });
     } catch (error) {
@@ -246,6 +274,7 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
       );
     } finally {
       setIsSending(false);
+      setSentAt(null);
     }
   }, [apiKey, canSend, prompt, session?.id]);
 
@@ -367,18 +396,23 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
               title="Settings"
               aria-label="Settings"
             >
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
-                <circle cx="8" cy="8" r="2.2" stroke="currentColor" strokeWidth="1.3" />
+              <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
                 <path
-                  d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.5 3.5l1.4 1.4M11.1 11.1l1.4 1.4M3.5 12.5l1.4-1.4M11.1 4.9l1.4-1.4"
-                  stroke="currentColor"
-                  strokeWidth="1.2"
-                  strokeLinecap="round"
+                  fillRule="evenodd"
+                  clipRule="evenodd"
+                  d="M8.34 1.804A1 1 0 0 1 9.32 1h1.36a1 1 0 0 1 .98.804l.295 1.473c.497.144.971.342 1.416.587l1.25-.834a1 1 0 0 1 1.262.125l.962.962a1 1 0 0 1 .125 1.262l-.834 1.25c.245.445.443.919.587 1.416l1.473.294a1 1 0 0 1 .804.98v1.361a1 1 0 0 1-.804.98l-1.473.295a6.95 6.95 0 0 1-.587 1.416l.834 1.25a1 1 0 0 1-.125 1.262l-.962.962a1 1 0 0 1-1.262.125l-1.25-.834a6.953 6.953 0 0 1-1.416.587l-.294 1.473a1 1 0 0 1-.98.804H9.32a1 1 0 0 1-.98-.804l-.295-1.473a6.957 6.957 0 0 1-1.416-.587l-1.25.834a1 1 0 0 1-1.262-.125l-.962-.962a1 1 0 0 1-.125-1.262l.834-1.25a6.957 6.957 0 0 1-.587-1.416l-1.473-.294A1 1 0 0 1 1 10.68V9.32a1 1 0 0 1 .804-.98l1.473-.295c.144-.497.342-.971.587-1.416l-.834-1.25a1 1 0 0 1 .125-1.262l.962-.962A1 1 0 0 1 5.38 3.03l1.25.834a6.957 6.957 0 0 1 1.416-.587l.294-1.473zM13 10a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"
                 />
               </svg>
             </button>
           </div>
         </header>
+
+        {isHydrating ? (
+          <p className="hydration-header">
+            <span className="pulse-dot" aria-hidden />
+            Restoring your last session…
+          </p>
+        ) : null}
 
         {returningHeaderVisible ? (
           <p className="returning-header">Last time you were circling {lastTurnGist}.</p>
@@ -439,7 +473,15 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
             rows={4}
           />
           <div className={`composer-row${isSending ? " composer-row--busy" : ""}`}>
-            <span className="composer-status">{status || "Idle — Cmd/Ctrl+Enter to send."}</span>
+            <span className="composer-status">
+              {isSending ? <span className="pulse-dot" aria-hidden /> : null}
+              {status || "Idle — Cmd/Ctrl+Enter to send."}
+              {isSending && isLate ? (
+                <span className="composer-late">
+                  &nbsp;— taking a moment; the model hasn't given up.
+                </span>
+              ) : null}
+            </span>
             <button
               className={isSending ? "send-btn send-btn--working" : "send-btn"}
               disabled={!canSend}
@@ -451,8 +493,12 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
       </section>
 
       <aside className="sidebar">
-        <ConceptCanvas sessionId={session?.id ?? null} refreshKey={graphRefresh} />
-        <ConnectionsTray refreshKey={graphRefresh} />
+        <ConceptCanvas
+          sessionId={session?.id ?? null}
+          refreshKey={graphRefresh}
+          curatorWorking={curatorWorking}
+        />
+        <ConnectionsTray refreshKey={graphRefresh} curatorWorking={curatorWorking} />
       </aside>
 
       {settingsOpen && (

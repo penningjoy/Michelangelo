@@ -100,16 +100,22 @@ function getSharedSphereGeometry(radius: number): THREE.SphereGeometry {
 export function ConceptCanvas({
   sessionId,
   refreshKey,
+  curatorWorking,
   onNodeClick
 }: {
   sessionId: string | null;
   refreshKey: number;
+  curatorWorking?: boolean;
   onNodeClick?: (conceptId: string) => void;
 }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [size, setSize] = useState<{ width: number; height: number }>({ width: 360, height: 480 });
   const [viewMode, setViewMode] = useState<ViewMode>("3d");
+  const [isFetching, setIsFetching] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [pulse, setPulse] = useState(false);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const prevSigRef = useRef<string>("");
 
   useEffect(() => {
     const saved = localStorage.getItem(VIEW_STORAGE) as ViewMode | null;
@@ -134,17 +140,33 @@ export function ConceptCanvas({
 
   useEffect(() => {
     let cancelled = false;
+    setIsFetching(true);
+    setFetchError(null);
     (async () => {
       try {
         const url = sessionId
           ? `/api/graph-data?sessionId=${encodeURIComponent(sessionId)}`
           : "/api/graph-data";
         const response = await fetch(url, { cache: "no-store" });
-        if (!response.ok) return;
+        if (!response.ok) {
+          if (!cancelled) setFetchError("Could not load brain map.");
+          return;
+        }
         const data = (await response.json()) as Snapshot;
-        if (!cancelled) setSnapshot(data);
+        if (!cancelled) {
+          setSnapshot(data);
+          // Briefly pulse when the graph has changed shape (new nodes or edges).
+          const sig = `${data.nodes.length}:${data.edges.length}`;
+          if (prevSigRef.current && prevSigRef.current !== sig) {
+            setPulse(true);
+            window.setTimeout(() => setPulse(false), 1400);
+          }
+          prevSigRef.current = sig;
+        }
       } catch {
-        // swallow — canvas shows fallback state
+        if (!cancelled) setFetchError("Could not load brain map.");
+      } finally {
+        if (!cancelled) setIsFetching(false);
       }
     })();
     return () => {
@@ -240,12 +262,25 @@ export function ConceptCanvas({
     <aside className="concept-canvas" ref={wrapperRef}>
       <header className="concept-canvas-header">
         <div>
-          <p className="eyebrow">Brain map</p>
+          <p className="eyebrow">
+            Brain map
+            {(isFetching || curatorWorking) && !fetchError ? (
+              <span className="pulse-dot" aria-hidden title="Refreshing" />
+            ) : null}
+          </p>
           <p className="muted">
-            {graphData.nodes.length} concept{graphData.nodes.length === 1 ? "" : "s"}
-            {graphData.links.length > 0
-              ? ` · ${graphData.links.length} accepted link${graphData.links.length === 1 ? "" : "s"}`
-              : ""}
+            {fetchError ? (
+              <span className="canvas-error">{fetchError}</span>
+            ) : curatorWorking ? (
+              "Curator is weaving new links…"
+            ) : (
+              <>
+                {graphData.nodes.length} concept{graphData.nodes.length === 1 ? "" : "s"}
+                {graphData.links.length > 0
+                  ? ` · ${graphData.links.length} accepted link${graphData.links.length === 1 ? "" : "s"}`
+                  : ""}
+              </>
+            )}
           </p>
         </div>
         <div className="view-toggle" role="group" aria-label="View mode">
@@ -271,7 +306,7 @@ export function ConceptCanvas({
           Run turns and accept proposed connections — the map fills in here.
         </p>
       ) : (
-        <div className="concept-canvas-stage">
+        <div className={`concept-canvas-stage${pulse ? " concept-canvas-stage--pulse" : ""}`}>
           {viewMode === "3d" ? (
             <ForceGraph3D
               graphData={graphData}

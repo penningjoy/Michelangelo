@@ -660,6 +660,66 @@ p {
   }
 }
 
+/* Generic loading pulse used in headers + status lines */
+.pulse-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin: 0 6px 1px 0;
+  vertical-align: middle;
+  background: var(--accent);
+  border-radius: 50%;
+  animation: pulse-dot 1400ms ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.1);
+  }
+}
+
+.hydration-header {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--muted);
+  padding: var(--space-2) 0;
+}
+
+.composer-late {
+  color: var(--accent);
+  font-style: italic;
+}
+
+.canvas-error {
+  color: var(--accent);
+}
+
+/* Brief frame pulse when graph data changes shape */
+.concept-canvas-stage--pulse {
+  animation: stage-pulse 1400ms ease-out;
+}
+
+@keyframes stage-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(138, 58, 29, 0.45);
+    border-color: var(--accent);
+  }
+  80% {
+    box-shadow: 0 0 0 8px rgba(138, 58, 29, 0);
+    border-color: var(--hairline);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(138, 58, 29, 0);
+    border-color: var(--hairline);
+  }
+}
+
 .composer {
   display: flex;
   flex-direction: column;

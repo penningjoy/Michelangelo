@@ -21,6 +21,7 @@ import {
   retrieveCrossDomainContext
 } from "../../../lib/retrieval";
 import { runCurator, type TurnConcept } from "../../../lib/curator";
+import { upsertConcepts } from "../../../lib/graph";
 import type { ResearchArtifacts, ResearchEvent } from "../../../lib/types";
 
 export const runtime = "nodejs";
@@ -157,13 +158,18 @@ export async function POST(request: Request) {
 
         send({ type: "done", sessionId: session.id });
 
+        // Fire-and-forget: make this turn's concepts exist as :Concept nodes
+        // in Neo4j so the brain map shows them immediately — regardless of
+        // whether the curator (next block) proposes any edges for them.
+        const allConceptSlugs = Array.from(
+          new Set(finalResult.artifacts.insights.flatMap((insight) => insight.concepts))
+        );
+        void upsertConcepts(allConceptSlugs);
+
         // Fire-and-forget: embed any new concept labels for future vector retrieval.
         const pool = getPoolIfAvailable();
         if (pool && hasVectorSupport()) {
-          const allLabels = Array.from(
-            new Set(finalResult.artifacts.insights.flatMap((insight) => insight.concepts))
-          );
-          void backfillConceptEmbeddings(pool, effectiveKey, allLabels);
+          void backfillConceptEmbeddings(pool, effectiveKey, allConceptSlugs);
         }
 
         // Fire-and-forget: the curator proposes typed edges between this

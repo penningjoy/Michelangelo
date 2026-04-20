@@ -68,6 +68,23 @@ export async function upsertConcept(concept: ConceptInput): Promise<void> {
   });
 }
 
+/**
+ * Ensure all concept slugs exist as :Concept nodes. Used after persistTurn so
+ * the canvas shows nodes immediately, before (or independent of) the curator
+ * proposing edges. Never throws; swallows errors so the request is not blocked.
+ */
+export async function upsertConcepts(slugs: string[]): Promise<void> {
+  try {
+    if (!isGraphEnabled()) return;
+    const unique = Array.from(new Set(slugs));
+    for (const slug of unique) {
+      await upsertConcept({ id: slug, label: slug });
+    }
+  } catch {
+    // swallow
+  }
+}
+
 export type RelationType = "analogous-to" | "generalizes" | "tension-with" | "enables" | "contrasts";
 export type RelationStatus = "proposed" | "accepted" | "rejected";
 export type RelationCreatedBy = "agent" | "user";

@@ -60,8 +60,8 @@ export type CuratorInput = {
 export async function runCurator(input: CuratorInput): Promise<{ proposed: number }> {
   try {
     if (!isGraphEnabled()) return { proposed: 0 };
-    if (isMockMode(input.apiKey)) return { proposed: 0 };
     if (input.turnConcepts.length === 0) return { proposed: 0 };
+    if (isMockMode(input.apiKey)) return runMockCurator(input);
 
     const pairs = await buildCandidatePairs(input);
     if (pairs.length === 0) return { proposed: 0 };
@@ -315,4 +315,40 @@ function parseJsonObject(text: string): unknown {
 
 function isMockMode(apiKey: string): boolean {
   return process.env.MOCK_MODEL === "true" || apiKey === "sk-mock";
+}
+
+/**
+ * Deterministic curator for mock mode. Generates up to 3 proposed edges between
+ * adjacent turn concepts so the UI can be exercised end-to-end without burning
+ * tokens. Idempotent: skips pairs that already have any edge.
+ */
+async function runMockCurator(input: CuratorInput): Promise<{ proposed: number }> {
+  const concepts = input.turnConcepts;
+  if (concepts.length < 2) return { proposed: 0 };
+
+  const rotation: RelationType[] = ["analogous-to", "generalizes", "enables"];
+  let proposed = 0;
+
+  for (let i = 0; i < Math.min(3, concepts.length - 1); i++) {
+    const a = concepts[i];
+    const b = concepts[i + 1];
+    if (await anyEdgeBetween(a.id, b.id)) continue;
+
+    const type = rotation[i % rotation.length];
+    await upsertConcept({ id: a.id, label: a.label });
+    await upsertConcept({ id: b.id, label: b.label });
+    await upsertRelation({
+      fromId: a.id,
+      toId: b.id,
+      type,
+      rationale: `[mock] ${a.label.replace(/-/g, " ")} and ${b.label.replace(/-/g, " ")} share a plausible bridge worth inspecting.`,
+      citedInsights: [a.currentInsightId, b.currentInsightId].filter(Boolean),
+      confidence: 0.6,
+      createdBy: "agent",
+      status: "proposed"
+    });
+    proposed += 1;
+  }
+
+  return { proposed };
 }
