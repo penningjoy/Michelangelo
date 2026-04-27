@@ -12,6 +12,7 @@ import {
 } from "react";
 import { ConceptCanvas } from "./ConceptCanvas";
 import { CitationHoverCard } from "./CitationHoverCard";
+import { MarkdownAnswer } from "./MarkdownAnswer";
 import { SessionSidebar } from "./SessionSidebar";
 import type {
   ApplicationArtifact,
@@ -899,7 +900,7 @@ function MessageBubble({
       ) : (
         <div className="message-body">
           {isAssistant ? (
-            <AssistantProse
+            <MarkdownAnswer
               text={message.content}
               spans={spans}
               sources={sources}
@@ -1298,102 +1299,6 @@ function PreviewChips<T>({
       ) : null}
     </>
   );
-}
-
-type Insertion =
-  | { kind: "citation"; start: number; end: number; srcId: string }
-  | { kind: "concept"; start: number; end: number; span: ConceptSpanForClient };
-
-function AssistantProse({
-  text,
-  spans,
-  sources,
-  sourceOrder,
-  onCitationClick
-}: {
-  text: string;
-  spans: ConceptSpanForClient[];
-  sources: SourceArtifact[];
-  sourceOrder: Map<string, number>;
-  onCitationClick?: (srcId: string) => void;
-}) {
-  const sourceById = useMemo(() => new Map(sources.map((source) => [source.id, source])), [sources]);
-
-  const insertions: Insertion[] = useMemo(() => {
-    const list: Insertion[] = [];
-    const citationRegex = /\[src-(\d+)\]/g;
-    let match: RegExpExecArray | null;
-    while ((match = citationRegex.exec(text)) !== null) {
-      list.push({
-        kind: "citation",
-        start: match.index,
-        end: match.index + match[0].length,
-        srcId: `src-${match[1]}`
-      });
-    }
-    for (const span of spans) {
-      list.push({ kind: "concept", start: span.start, end: span.end, span });
-    }
-    list.sort((a, b) => a.start - b.start);
-    const pruned: Insertion[] = [];
-    let cursor = 0;
-    for (const insertion of list) {
-      if (insertion.start < cursor) continue;
-      pruned.push(insertion);
-      cursor = insertion.end;
-    }
-    return pruned;
-  }, [text, spans]);
-
-  if (insertions.length === 0) return <span className="assistant-prose">{text}</span>;
-
-  const nodes: React.ReactNode[] = [];
-  let cursor = 0;
-  insertions.forEach((insertion, index) => {
-    if (insertion.start > cursor) {
-      nodes.push(<span key={`text-${index}`}>{text.slice(cursor, insertion.start)}</span>);
-    }
-    if (insertion.kind === "concept") {
-      const span = insertion.span;
-      const tooltip = span.priorSessionTitle
-        ? `From "${span.priorSessionTitle}" (turn ${span.priorTurnIndex}): ${span.priorClaim ?? ""}`
-        : span.conceptLabel;
-      nodes.push(
-        <span key={`concept-${index}`} className="concept-underline" title={tooltip}>
-          {text.slice(span.start, span.end)}
-        </span>
-      );
-    } else {
-      const source = sourceById.get(insertion.srcId);
-      const num = sourceOrder.get(insertion.srcId);
-      if (!source || !num) {
-        nodes.push(
-          <sup key={`unknown-${index}`} className="citation citation--unknown" title={insertion.srcId}>
-            ?
-          </sup>
-        );
-      } else {
-        nodes.push(
-          <CitationHoverCard
-            key={`source-${index}`}
-            source={source}
-            number={num}
-            domain={domainFromUrl(source.url)}
-            onActivate={() => onCitationClick?.(source.id)}
-          >
-            <sup className="citation">
-              <span className="citation-pill">{num}</span>
-            </sup>
-          </CitationHoverCard>
-        );
-      }
-    }
-    cursor = insertion.end;
-  });
-  if (cursor < text.length) {
-    nodes.push(<span key="tail">{text.slice(cursor)}</span>);
-  }
-  return <span className="assistant-prose">{nodes}</span>;
 }
 
 function SourceArchive({
