@@ -51,6 +51,7 @@ export type TurnConcept = {
 
 export type CuratorInput = {
   apiKey: string;
+  owner: string;
   sessionId: string;
   turnConcepts: TurnConcept[];
   pool: Pool;
@@ -100,14 +101,14 @@ type CandidatePair = {
 };
 
 async function buildCandidatePairs(input: CuratorInput): Promise<CandidatePair[]> {
-  const { pool, hasVector, sessionId, turnConcepts, apiKey } = input;
+  const { pool, hasVector, owner, sessionId, turnConcepts, apiKey } = input;
   const pairs: CandidatePair[] = [];
   const seen = new Set<string>();
 
   for (const concept of turnConcepts) {
     const neighbors = hasVector
-      ? await vectorNeighbors(pool, apiKey, concept, sessionId)
-      : await labelNeighbors(pool, concept, sessionId);
+      ? await vectorNeighbors(pool, apiKey, concept, owner, sessionId)
+      : await labelNeighbors(pool, concept, owner, sessionId);
 
     for (const neighbor of neighbors) {
       const [lo, hi] = [concept.id, neighbor.id].sort();
@@ -145,6 +146,7 @@ async function vectorNeighbors(
   pool: Pool,
   apiKey: string,
   concept: TurnConcept,
+  owner: string,
   currentSessionId: string
 ): Promise<NeighborClaim[]> {
   const client = new OpenAI({ apiKey });
@@ -153,32 +155,45 @@ async function vectorNeighbors(
     .create({ model: "text-embedding-3-small", input: needle })
     .then((r) => r.data[0]?.embedding ?? null)
     .catch(() => null);
-  if (!embedding) return labelNeighbors(pool, concept, currentSessionId);
+  if (!embedding) return labelNeighbors(pool, concept, owner, currentSessionId);
 
   const vectorLiteral = `[${embedding.join(",")}]`;
   const rows = await pool.query<{ id: string; label: string }>(
-    `select id, label from concepts
-       where embedding is not null and id <> $1
-       order by embedding <=> $2::vector
-       limit $3`,
-    [concept.id, vectorLiteral, TOP_K_NEIGHBORS]
+    `select c.id, c.label
+       from concepts c
+      where c.embedding is not null
+        and c.id <> $1
+        and exists (
+          select 1
+            from concept_mentions cm
+            join sessions s on s.id = cm.session_id
+           where cm.concept_id = c.id and s.owner = $2
+        )
+       order by c.embedding <=> $3::vector
+       limit $4`,
+    [concept.id, owner, vectorLiteral, TOP_K_NEIGHBORS]
   );
-  return hydrateNeighbors(pool, rows.rows, currentSessionId);
+  return hydrateNeighbors(pool, rows.rows, owner, currentSessionId);
 }
 
 async function labelNeighbors(
   pool: Pool,
   concept: TurnConcept,
+  owner: string,
   currentSessionId: string
 ): Promise<NeighborClaim[]> {
   const rows = await pool.query<{ id: string; label: string }>(
-    `select id, label from concepts
-       where id <> $1
-       order by mention_count desc
-       limit $2`,
-    [concept.id, TOP_K_NEIGHBORS]
+    `select c.id, c.label
+       from concepts c
+       join concept_mentions cm on cm.concept_id = c.id
+       join sessions s on s.id = cm.session_id
+      where c.id <> $1 and s.owner = $2
+      group by c.id, c.label
+      order by count(*) desc
+      limit $3`,
+    [concept.id, owner, TOP_K_NEIGHBORS]
   );
-  return hydrateNeighbors(pool, rows.rows, currentSessionId);
+  return hydrateNeighbors(pool, rows.rows, owner, currentSessionId);
 }
 
 type NeighborClaim = {
@@ -191,6 +206,7 @@ type NeighborClaim = {
 async function hydrateNeighbors(
   pool: Pool,
   rows: Array<{ id: string; label: string }>,
+  owner: string,
   currentSessionId: string
 ): Promise<NeighborClaim[]> {
   const out: NeighborClaim[] = [];
@@ -201,9 +217,10 @@ async function hydrateNeighbors(
     }>(
       `select session_id, insight_id from concept_mentions
         where concept_id = $1 and session_id <> $2
+          and session_id in (select id from sessions where owner = $3)
         order by created_at desc
         limit 1`,
-      [row.id, currentSessionId]
+      [row.id, currentSessionId, owner]
     );
     const first = mention.rows[0];
     if (!first) continue;
@@ -221,11 +238,11 @@ async function hydrateNeighbors(
 
 async function lookupClaim(pool: Pool, sessionId: string, insightId: string): Promise<string | null> {
   const result = await pool.query<{ content_json: { id: string; claim: string }[] }>(
-    `select content_json from artifacts where session_id = $1 and type = 'insights' limit 1`,
+    `select content_json from artifacts where session_id = $1 and type = 'claims' limit 1`,
     [sessionId]
   );
-  const insights = result.rows[0]?.content_json ?? [];
-  return insights.find((insight) => insight.id === insightId)?.claim ?? null;
+  const claims = result.rows[0]?.content_json ?? [];
+  return claims.find((insight) => insight.id === insightId)?.claim ?? null;
 }
 
 async function anyEdgeBetween(aId: string, bId: string): Promise<boolean> {

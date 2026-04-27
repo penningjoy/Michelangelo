@@ -4,10 +4,10 @@ _Last updated: 2026-04-19_
 
 ## Purpose
 
-A browser-first research workspace that behaves like an ongoing conversation
-with a careful research assistant. Each turn produces a concise plain-text
-answer **and** a set of inspectable artifacts (summary, sources, insights,
-caveats). Across turns and sessions, the workspace builds a concept memory
+A browser-first concept workspace that behaves like an ongoing conversation
+with an interdisciplinary teacher. Each turn produces a concise plain-text
+answer **and** a set of inspectable artifacts (core idea, analogies, parallels,
+applications, unexplored directions, sources). Across turns and sessions, the workspace builds a concept memory
 that surfaces cross-domain connections the user did not name.
 
 Stated moat: **association, correlation, and pattern-finding across subjects
@@ -40,18 +40,13 @@ When the structured tail finishes, the artifact rail on the right updates
 with:
 
 - a **summary** (title + framing),
-- an **evidence compass** showing how the turn's insights distribute across
-  `direct / strong / tentative / speculative`,
-- a **staked insight** — the single claim the assistant would bet the turn
-  on, rendered larger in the reading face with its caveat in italic,
-- **other insights**, each paired with an evidence-dot indicator and
-  favicon/domain badges for its cited sources,
+- a **core** section (essence + plain-language explanation),
+- **analogies** (2–5 concrete analogies + why each works),
+- **parallels** (3–5 structural echoes in humanities/social sciences),
+- **applications** (3–5 practical cross-domain uses),
+- **unexplored** (2–4 ideas worth pondering next),
 - a **sources** list (title, excerpt, reason, link),
-- a **caveats** list (severity + text).
-
-Direct-evidence insights must include a verbatim quote from a cited source.
-If grounding fails, the server silently downgrades the insight to
-`tentative`.
+- optional **founder mode** opportunities (product idea, MVP hook, failure mode, experiment).
 
 ### 4. Follow-up turns in the same session
 
@@ -98,17 +93,21 @@ Each turn returns:
 - a plain-text answer (2–6 sentences);
 - `artifacts`:
   - `summary` (title, framing),
+  - `core` (essence, explanation),
+  - 2–5 `analogies` (id, title, description, whyItWorks),
+  - 3–5 `parallels` (id, domain, concept, connection, optional caveat),
+  - 3–5 `applications` (id, domain, use, example),
+  - 2–4 `unexplored` (id, idea, whyItMatters, optional suggestedNextStep),
+  - `claims` (0–6 short claims for session memory),
+  - `concepts` (2–10 kebab-case labels),
   - 3–5 `sources` (id, title, url, excerpt, reason),
-  - 3–5 `insights` (id, claim, evidenceLevel, sourceIds, caveat, concepts,
-    staked, optional supportingQuote),
-  - 2–4 `caveats` (id, text, severity);
+  - optional `founderMode` opportunities;
 - `compact` (gist ≤ 280 chars; up to 4 key claims ≤ 140 chars each).
 
 Hard invariants enforced server-side:
 
-- Exactly one insight per turn has `staked: true`.
-- `evidenceLevel: "direct"` requires a `supportingQuote` present as a
-  substring of one cited source's `excerpt`; otherwise the server downgrades.
+- Artifact payload must satisfy schema for the five-act pedagogy model.
+- `concepts` must be present for cross-session retrieval and graph linking.
 
 ## Brand and tone
 

@@ -1,7 +1,5 @@
 export type Role = "user" | "assistant";
 
-export type EvidenceLevel = "direct" | "strong" | "tentative" | "speculative";
-
 export type SourceArtifact = {
   id: string;
   title: string;
@@ -10,21 +8,58 @@ export type SourceArtifact = {
   reason: string;
 };
 
-export type InsightArtifact = {
-  id: string;
-  claim: string;
-  evidenceLevel: EvidenceLevel;
-  sourceIds: string[];
-  caveat: string;
-  concepts: string[];
-  staked: boolean;
-  supportingQuote?: string;
+export type CoreArtifact = {
+  essence: string;
+  explanation: string;
 };
 
-export type CaveatArtifact = {
+export type AnalogyArtifact = {
   id: string;
-  text: string;
-  severity: "low" | "medium" | "high";
+  title: string;
+  description: string;
+  whyItWorks: string;
+};
+
+export type ParallelArtifact = {
+  id: string;
+  domain: string;
+  concept: string;
+  connection: string;
+  caveat?: string;
+};
+
+export type ApplicationArtifact = {
+  id: string;
+  domain: string;
+  use: string;
+  example: string;
+};
+
+export type UnexploredArtifact = {
+  id: string;
+  idea: string;
+  whyItMatters: string;
+  suggestedNextStep?: string;
+};
+
+export type FounderOpportunity = {
+  id: string;
+  productIdea: string;
+  targetUser: string;
+  painPoint: string;
+  oneWeekMvp: string;
+  successSignal: string;
+  failureMode: string;
+  nextExperiment: string;
+};
+
+export type FounderModeArtifact = {
+  opportunities: FounderOpportunity[];
+};
+
+export type PedagogicalClaim = {
+  id: string;
+  claim: string;
 };
 
 export type ResearchArtifacts = {
@@ -32,9 +67,15 @@ export type ResearchArtifacts = {
     title: string;
     framing: string;
   };
+  core: CoreArtifact;
+  analogies: AnalogyArtifact[];
+  parallels: ParallelArtifact[];
+  applications: ApplicationArtifact[];
+  unexplored: UnexploredArtifact[];
+  claims: PedagogicalClaim[];
+  concepts: string[];
   sources: SourceArtifact[];
-  insights: InsightArtifact[];
-  caveats: CaveatArtifact[];
+  founderMode?: FounderModeArtifact;
 };
 
 export type StoredArtifact = {
@@ -70,6 +111,12 @@ export type SessionRecord = {
   createdAt: string;
   updatedAt: string;
 };
+
+export type SessionListItem = SessionRecord & {
+  lastTurnGist: string | null;
+};
+
+export type ResearchDepth = "quick" | "standard" | "deep";
 
 export type TurnSummary = {
   id: string;

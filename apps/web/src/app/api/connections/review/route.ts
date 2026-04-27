@@ -1,5 +1,7 @@
 import { z } from "zod";
-import { isGraphEnabled, updateEdgeStatus } from "../../../../lib/graph";
+import { requireDemoPrincipal } from "../../../../lib/demoAccess";
+import { getEdgeById, isGraphEnabled, updateEdgeStatus } from "../../../../lib/graph";
+import { listOwnedConceptIds } from "../../../../lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,6 +22,10 @@ const reviewSchema = z.object({
 });
 
 export async function POST(request: Request) {
+  const access = requireDemoPrincipal(request);
+  if (!access.ok) {
+    return Response.json({ error: access.error }, { status: access.status });
+  }
   if (!isGraphEnabled()) {
     return Response.json({ error: "Graph is not configured." }, { status: 503 });
   }
@@ -29,6 +35,14 @@ export async function POST(request: Request) {
   }
 
   const { edgeId, action, type, note } = parsed.data;
+  const edge = await getEdgeById(edgeId);
+  if (!edge) {
+    return Response.json({ error: "Connection not found." }, { status: 404 });
+  }
+  const ownedConceptIds = await listOwnedConceptIds(access.principal, [edge.fromId, edge.toId]);
+  if (!ownedConceptIds.has(edge.fromId) || !ownedConceptIds.has(edge.toId)) {
+    return Response.json({ error: "Connection not found." }, { status: 404 });
+  }
   await updateEdgeStatus({
     edgeId,
     status: action === "accept" ? "accepted" : "rejected",

@@ -25,6 +25,7 @@ describe("curator", () => {
   it("no-ops when graph env is absent", async () => {
     const result = await runCurator({
       apiKey: "sk-test",
+      owner: "principal-1",
       sessionId: "sess-1",
       turnConcepts: [
         { id: "queueing-theory", label: "queueing-theory", currentClaim: "x", currentInsightId: "ins-1" }
@@ -43,6 +44,7 @@ describe("curator", () => {
 
     const result = await runCurator({
       apiKey: "sk-mock",
+      owner: "principal-1",
       sessionId: "sess-1",
       turnConcepts: [
         { id: "x", label: "x", currentClaim: "c", currentInsightId: "ins-1" }
@@ -60,6 +62,7 @@ describe("curator", () => {
 
     const result = await runCurator({
       apiKey: "sk-test",
+      owner: "principal-1",
       sessionId: "sess-1",
       turnConcepts: [],
       pool: {} as never,

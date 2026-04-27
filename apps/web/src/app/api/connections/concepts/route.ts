@@ -1,4 +1,5 @@
-import { getPoolIfAvailable } from "../../../../lib/storage";
+import { requireDemoPrincipal } from "../../../../lib/demoAccess";
+import { listConceptsForOwner } from "../../../../lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,16 +10,18 @@ export type ConceptOption = {
   mentionCount: number;
 };
 
-export async function GET() {
-  const pool = getPoolIfAvailable();
-  if (!pool) return Response.json({ concepts: [] });
-  const result = await pool.query<{ id: string; label: string; mention_count: number }>(
-    `select id, label, mention_count from concepts order by mention_count desc, label asc limit 500`
+export async function GET(request: Request) {
+  const access = requireDemoPrincipal(request);
+  if (!access.ok) {
+    return Response.json({ error: access.error }, { status: access.status });
+  }
+
+  const concepts: ConceptOption[] = (await listConceptsForOwner(access.principal, 500)).map(
+    (concept) => ({
+      id: concept.id,
+      label: concept.label,
+      mentionCount: concept.mentionCount
+    })
   );
-  const concepts: ConceptOption[] = result.rows.map((row) => ({
-    id: row.id,
-    label: row.label,
-    mentionCount: Number(row.mention_count)
-  }));
   return Response.json({ concepts });
 }

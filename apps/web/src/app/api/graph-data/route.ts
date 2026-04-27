@@ -1,10 +1,21 @@
+import { requireDemoPrincipal } from "../../../lib/demoAccess";
 import { getGraphSnapshot, isGraphEnabled } from "../../../lib/graph";
-import { getPoolIfAvailable } from "../../../lib/storage";
+import {
+  getPoolIfAvailable,
+  listConceptsForOwner,
+  listOwnedConceptIds,
+  listSessionConceptIds
+} from "../../../lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
+  const access = requireDemoPrincipal(request);
+  if (!access.ok) {
+    return Response.json({ error: access.error }, { status: access.status });
+  }
+
   const url = new URL(request.url);
   const sessionId = url.searchParams.get("sessionId");
 
@@ -17,28 +28,30 @@ export async function GET(request: Request) {
     return Response.json({ nodes: [], edges: [], enabled: true });
   }
 
-  const seedIds = await resolveSeedIds(pool, sessionId);
+  const seedIds = await resolveSeedIds(access.principal, sessionId);
   if (seedIds.length === 0) {
     return Response.json({ nodes: [], edges: [], enabled: true });
   }
 
   const snapshot = await getGraphSnapshot(seedIds);
-  return Response.json({ ...snapshot, seedIds, enabled: true });
+  const allowedConceptIds = await listOwnedConceptIds(access.principal);
+  const nodes = snapshot.nodes.filter((node) => allowedConceptIds.has(node.id));
+  const allowedNodeIds = new Set(nodes.map((node) => node.id));
+  const edges = snapshot.edges.filter(
+    (edge) => allowedNodeIds.has(edge.fromId) && allowedNodeIds.has(edge.toId)
+  );
+  return Response.json({
+    nodes,
+    edges,
+    seedIds: seedIds.filter((id) => allowedNodeIds.has(id)),
+    enabled: true
+  });
 }
 
-async function resolveSeedIds(
-  pool: import("pg").Pool,
-  sessionId: string | null
-): Promise<string[]> {
+async function resolveSeedIds(owner: string, sessionId: string | null): Promise<string[]> {
   if (sessionId) {
-    const result = await pool.query<{ concept_id: string }>(
-      `select distinct concept_id from concept_mentions where session_id = $1`,
-      [sessionId]
-    );
-    return result.rows.map((row) => row.concept_id);
+    return listSessionConceptIds(sessionId, owner);
   }
-  const result = await pool.query<{ id: string }>(
-    `select id from concepts order by mention_count desc limit 40`
-  );
-  return result.rows.map((row) => row.id);
+  const concepts = await listConceptsForOwner(owner, 40);
+  return concepts.map((concept) => concept.id);
 }

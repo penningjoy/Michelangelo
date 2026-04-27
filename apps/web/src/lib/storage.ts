@@ -5,6 +5,7 @@ import type {
   ConceptRecord,
   ConceptSpanForClient,
   ResearchArtifacts,
+  SessionListItem,
   SessionRecord,
   StoredArtifact,
   TurnSummary
@@ -14,6 +15,7 @@ import type { CompactSummary } from "./schemas";
 type DbSession = {
   id: string;
   title: string;
+  owner: string;
   created_at: Date;
   updated_at: Date;
 };
@@ -36,7 +38,7 @@ type DbArtifact = {
 };
 
 const memory = {
-  sessions: new Map<string, SessionRecord>(),
+  sessions: new Map<string, SessionRecord & { owner: string }>(),
   messages: new Map<string, ChatMessage[]>(),
   artifacts: new Map<string, StoredArtifact[]>(),
   turnSummaries: new Map<string, TurnSummary[]>(),
@@ -60,56 +62,95 @@ export function hasVectorSupport(): boolean {
   return vectorAvailable;
 }
 
-export async function createSession(title: string): Promise<SessionRecord> {
+export async function createSession(title: string, owner: string): Promise<SessionRecord> {
   if (!hasDatabase()) {
     const session = {
       id: crypto.randomUUID(),
       title,
+      owner,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
     memory.sessions.set(session.id, session);
     memory.messages.set(session.id, []);
     memory.artifacts.set(session.id, []);
-    return session;
+    return mapMemorySession(session);
   }
 
   await ensureSchema();
   const id = crypto.randomUUID();
   const result = await getPool().query<DbSession>(
-    "insert into sessions (id, title) values ($1, $2) returning id, title, created_at, updated_at",
-    [id, title]
+    "insert into sessions (id, title, owner) values ($1, $2, $3) returning id, title, owner, created_at, updated_at",
+    [id, title, owner]
   );
   return mapSession(result.rows[0]);
 }
 
 export async function renameSession(
   id: string,
-  title: string
+  title: string,
+  owner: string
 ): Promise<SessionRecord | null> {
   if (!hasDatabase()) {
     const current = memory.sessions.get(id);
-    if (!current) return null;
+    if (!current || current.owner !== owner) return null;
     const updated = { ...current, title, updatedAt: new Date().toISOString() };
     memory.sessions.set(id, updated);
-    return updated;
+    return mapMemorySession(updated);
   }
 
   await ensureSchema();
   const result = await getPool().query<DbSession>(
-    "update sessions set title = $2, updated_at = now() where id = $1 returning id, title, created_at, updated_at",
-    [id, title]
+    "update sessions set title = $2, updated_at = now() where id = $1 and owner = $3 returning id, title, owner, created_at, updated_at",
+    [id, title, owner]
   );
   return result.rows[0] ? mapSession(result.rows[0]) : null;
 }
 
-export async function getSession(id: string): Promise<SessionRecord | null> {
-  if (!hasDatabase()) return memory.sessions.get(id) ?? null;
+export async function listSessions(owner: string, limit = 50): Promise<SessionListItem[]> {
+  if (!hasDatabase()) {
+    const sessions = Array.from(memory.sessions.values())
+      .filter((session) => session.owner === owner)
+      .slice()
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, limit);
+    return sessions.map((session) => {
+      const summaries = memory.turnSummaries.get(session.id) ?? [];
+      const last = summaries.length ? summaries[summaries.length - 1] : null;
+      return { ...mapMemorySession(session), lastTurnGist: last?.gist ?? null };
+    });
+  }
+
+  await ensureSchema();
+  const result = await getPool().query<
+    DbSession & { last_gist: string | null }
+  >(
+    `select s.id, s.title, s.owner, s.created_at, s.updated_at,
+            (select gist from turn_summaries
+              where session_id = s.id
+              order by turn_index desc limit 1) as last_gist
+       from sessions s
+      where s.owner = $1
+      order by s.updated_at desc
+      limit $2`,
+    [owner, limit]
+  );
+  return result.rows.map((row) => ({
+    ...mapSession(row),
+    lastTurnGist: row.last_gist ?? null
+  }));
+}
+
+export async function getSession(id: string, owner: string): Promise<SessionRecord | null> {
+  if (!hasDatabase()) {
+    const session = memory.sessions.get(id);
+    return session?.owner === owner ? mapMemorySession(session) : null;
+  }
 
   await ensureSchema();
   const result = await getPool().query<DbSession>(
-    "select id, title, created_at, updated_at from sessions where id = $1",
-    [id]
+    "select id, title, owner, created_at, updated_at from sessions where id = $1 and owner = $2",
+    [id, owner]
   );
   return result.rows[0] ? mapSession(result.rows[0]) : null;
 }
@@ -169,13 +210,20 @@ export async function updateMessageConceptSpans(
   );
 }
 
-export async function listMessages(sessionId: string): Promise<ChatMessage[]> {
-  if (!hasDatabase()) return memory.messages.get(sessionId) ?? [];
+export async function listMessages(sessionId: string, owner: string): Promise<ChatMessage[]> {
+  if (!hasDatabase()) {
+    const session = memory.sessions.get(sessionId);
+    return session?.owner === owner ? memory.messages.get(sessionId) ?? [] : [];
+  }
 
   await ensureSchema();
   const result = await getPool().query<DbMessage>(
-    "select id, role, content, created_at, concept_spans from messages where session_id = $1 order by created_at asc",
-    [sessionId]
+    `select m.id, m.role, m.content, m.created_at, m.concept_spans
+       from messages m
+       join sessions s on s.id = m.session_id
+      where m.session_id = $1 and s.owner = $2
+      order by m.created_at asc`,
+    [sessionId, owner]
   );
   return result.rows.map(mapMessage);
 }
@@ -252,7 +300,7 @@ export async function persistTurn(
     gist: compact.gist,
     keyClaims: compact.keyClaims,
     sourceIds: artifacts.sources.map((source) => source.id),
-    insightIds: artifacts.insights.map((insight) => insight.id),
+    insightIds: artifacts.claims.map((claim) => claim.id),
     createdAt: new Date().toISOString()
   };
 
@@ -350,8 +398,10 @@ export async function persistTurn(
   }
 }
 
-export async function listTurnSummaries(sessionId: string): Promise<TurnSummary[]> {
+export async function listTurnSummaries(sessionId: string, owner: string): Promise<TurnSummary[]> {
   if (!hasDatabase()) {
+    const session = memory.sessions.get(sessionId);
+    if (session?.owner !== owner) return [];
     return (memory.turnSummaries.get(sessionId) ?? [])
       .slice()
       .sort((a, b) => a.turnIndex - b.turnIndex);
@@ -367,11 +417,12 @@ export async function listTurnSummaries(sessionId: string): Promise<TurnSummary[
     insight_ids: string[];
     created_at: Date;
   }>(
-    `select id, session_id, turn_index, gist, key_claims, source_ids, insight_ids, created_at
-       from turn_summaries
-      where session_id = $1
+    `select ts.id, ts.session_id, ts.turn_index, ts.gist, ts.key_claims, ts.source_ids, ts.insight_ids, ts.created_at
+       from turn_summaries ts
+       join sessions s on s.id = ts.session_id
+      where ts.session_id = $1 and s.owner = $2
       order by turn_index asc`,
-    [sessionId]
+    [sessionId, owner]
   );
   return result.rows.map((row) => ({
     id: row.id,
@@ -385,20 +436,129 @@ export async function listTurnSummaries(sessionId: string): Promise<TurnSummary[
   }));
 }
 
-export async function getLastTurnSummary(sessionId: string): Promise<TurnSummary | null> {
-  const all = await listTurnSummaries(sessionId);
+export async function getLastTurnSummary(sessionId: string, owner: string): Promise<TurnSummary | null> {
+  const all = await listTurnSummaries(sessionId, owner);
   return all.length ? all[all.length - 1] : null;
 }
 
-export async function listArtifacts(sessionId: string): Promise<StoredArtifact[]> {
-  if (!hasDatabase()) return memory.artifacts.get(sessionId) ?? [];
+export async function listArtifacts(sessionId: string, owner: string): Promise<StoredArtifact[]> {
+  if (!hasDatabase()) {
+    const session = memory.sessions.get(sessionId);
+    return session?.owner === owner ? memory.artifacts.get(sessionId) ?? [] : [];
+  }
 
   await ensureSchema();
   const result = await getPool().query<DbArtifact>(
-    "select id, session_id, type, content_json, created_at, updated_at from artifacts where session_id = $1 order by created_at asc",
-    [sessionId]
+    `select a.id, a.session_id, a.type, a.content_json, a.created_at, a.updated_at
+       from artifacts a
+       join sessions s on s.id = a.session_id
+      where a.session_id = $1 and s.owner = $2
+      order by a.created_at asc`,
+    [sessionId, owner]
   );
   return result.rows.map(mapArtifact);
+}
+
+export async function listSessionConceptIds(sessionId: string, owner: string): Promise<string[]> {
+  if (!hasDatabase()) {
+    const session = memory.sessions.get(sessionId);
+    if (session?.owner !== owner) return [];
+    return Array.from(
+      new Set(
+        memory.conceptMentions
+          .filter((mention) => mention.sessionId === sessionId)
+          .map((mention) => mention.conceptId)
+      )
+    );
+  }
+
+  await ensureSchema();
+  const result = await getPool().query<{ concept_id: string }>(
+    `select distinct cm.concept_id
+       from concept_mentions cm
+       join sessions s on s.id = cm.session_id
+      where cm.session_id = $1 and s.owner = $2`,
+    [sessionId, owner]
+  );
+  return result.rows.map((row) => row.concept_id);
+}
+
+export async function listConceptsForOwner(
+  owner: string,
+  limit = 500
+): Promise<Array<{ id: string; label: string; mentionCount: number }>> {
+  if (!hasDatabase()) {
+    const mentionCounts = new Map<string, number>();
+    for (const mention of memory.conceptMentions) {
+      const session = memory.sessions.get(mention.sessionId);
+      if (session?.owner !== owner) continue;
+      mentionCounts.set(mention.conceptId, (mentionCounts.get(mention.conceptId) ?? 0) + 1);
+    }
+    return Array.from(mentionCounts.entries())
+      .map(([id, mentionCount]) => {
+        const concept = memory.concepts.get(id);
+        return {
+          id,
+          label: concept?.label ?? id,
+          mentionCount
+        };
+      })
+      .sort((a, b) => b.mentionCount - a.mentionCount || a.label.localeCompare(b.label))
+      .slice(0, limit);
+  }
+
+  await ensureSchema();
+  const result = await getPool().query<{ id: string; label: string; mention_count: number }>(
+    `select c.id, c.label, count(*)::int as mention_count
+       from concepts c
+       join concept_mentions cm on cm.concept_id = c.id
+       join sessions s on s.id = cm.session_id
+      where s.owner = $1
+      group by c.id, c.label
+      order by mention_count desc, c.label asc
+      limit $2`,
+    [owner, limit]
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    label: row.label,
+    mentionCount: Number(row.mention_count)
+  }));
+}
+
+export async function listOwnedConceptIds(
+  owner: string,
+  candidateIds?: string[]
+): Promise<Set<string>> {
+  if (!hasDatabase()) {
+    const concepts = new Set<string>();
+    const allow = candidateIds ? new Set(candidateIds) : null;
+    for (const mention of memory.conceptMentions) {
+      const session = memory.sessions.get(mention.sessionId);
+      if (session?.owner !== owner) continue;
+      if (allow && !allow.has(mention.conceptId)) continue;
+      concepts.add(mention.conceptId);
+    }
+    return concepts;
+  }
+
+  await ensureSchema();
+  const result = candidateIds?.length
+    ? await getPool().query<{ concept_id: string }>(
+        `select distinct cm.concept_id
+           from concept_mentions cm
+           join sessions s on s.id = cm.session_id
+          where s.owner = $1 and cm.concept_id = any($2::text[])`,
+        [owner, candidateIds]
+      )
+    : await getPool().query<{ concept_id: string }>(
+        `select distinct cm.concept_id
+           from concept_mentions cm
+           join sessions s on s.id = cm.session_id
+          where s.owner = $1`,
+        [owner]
+      );
+  return new Set(result.rows.map((row) => row.concept_id));
 }
 
 export async function checkDatabase(): Promise<{ ok: boolean; mode: "postgres" | "memory" }> {
@@ -431,6 +591,7 @@ async function ensureSchema() {
     create table if not exists sessions (
       id text primary key,
       title text not null,
+      owner text,
       created_at timestamptz not null default now(),
       updated_at timestamptz not null default now()
     );
@@ -480,6 +641,18 @@ async function ensureSchema() {
       primary key(concept_id, session_id, insight_id)
     );
   `);
+  await getPool().query("alter table sessions add column if not exists owner text");
+  await getPool().query("update sessions set owner = coalesce(owner, 'legacy-demo')");
+  await getPool().query("alter table sessions alter column owner set not null");
+  await getPool().query(
+    "create index if not exists sessions_owner_updated_idx on sessions (owner, updated_at desc)"
+  );
+  await getPool().query(
+    "create index if not exists concept_mentions_session_idx on concept_mentions (session_id, created_at desc)"
+  );
+  await getPool().query(
+    "create index if not exists concept_mentions_concept_idx on concept_mentions (concept_id, created_at desc)"
+  );
   await getPool().query("alter table messages add column if not exists concept_spans jsonb");
   if (vectorAvailable) {
     try {
@@ -504,9 +677,10 @@ function getPool(): Pool {
     throw new Error("POSTGRES_URL or DATABASE_URL is required for Postgres mode.");
   }
   const isLocal = /localhost|127\.0\.0\.1|db:5432/.test(connectionString);
+  const allowInsecureTls = process.env.POSTGRES_SSL_NO_VERIFY === "true";
   pool = new Pool({
     connectionString,
-    ssl: isLocal ? false : { rejectUnauthorized: false },
+    ssl: isLocal ? false : { rejectUnauthorized: !allowInsecureTls },
     max: 3
   });
   return pool;
@@ -518,6 +692,15 @@ function mapSession(row: DbSession): SessionRecord {
     title: row.title,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString()
+  };
+}
+
+function mapMemorySession(row: SessionRecord & { owner: string }): SessionRecord {
+  return {
+    id: row.id,
+    title: row.title,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
   };
 }
 
@@ -543,4 +726,13 @@ function mapArtifact(row: DbArtifact): StoredArtifact {
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString()
   };
+}
+
+export function resetStorageForTests(): void {
+  memory.sessions.clear();
+  memory.messages.clear();
+  memory.artifacts.clear();
+  memory.turnSummaries.clear();
+  memory.concepts.clear();
+  memory.conceptMentions.length = 0;
 }

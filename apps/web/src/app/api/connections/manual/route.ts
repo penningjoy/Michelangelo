@@ -1,6 +1,7 @@
 import { z } from "zod";
+import { requireDemoPrincipal } from "../../../../lib/demoAccess";
 import { isGraphEnabled, upsertConcept, upsertRelation } from "../../../../lib/graph";
-import { getPoolIfAvailable } from "../../../../lib/storage";
+import { getPoolIfAvailable, listOwnedConceptIds } from "../../../../lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,6 +22,10 @@ const manualSchema = z.object({
 });
 
 export async function POST(request: Request) {
+  const access = requireDemoPrincipal(request);
+  if (!access.ok) {
+    return Response.json({ error: access.error }, { status: access.status });
+  }
   if (!isGraphEnabled()) {
     return Response.json({ error: "Graph is not configured." }, { status: 503 });
   }
@@ -34,6 +39,13 @@ export async function POST(request: Request) {
   }
 
   const pool = getPoolIfAvailable();
+  if (!pool) {
+    return Response.json({ error: "Graph storage is not configured." }, { status: 503 });
+  }
+  const ownedConceptIds = await listOwnedConceptIds(access.principal, [fromConceptId, toConceptId]);
+  if (!ownedConceptIds.has(fromConceptId) || !ownedConceptIds.has(toConceptId)) {
+    return Response.json({ error: "Concept not found." }, { status: 404 });
+  }
   const labels = await lookupLabels(pool, [fromConceptId, toConceptId]);
 
   await upsertConcept({ id: fromConceptId, label: labels.get(fromConceptId) ?? fromConceptId });

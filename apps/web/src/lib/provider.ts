@@ -1,6 +1,22 @@
 import OpenAI from "openai";
-import { researchResultSchema, type ResearchResult } from "./schemas";
-import type { ChatMessage, InsightArtifact, ResearchArtifacts, TurnSummary } from "./types";
+import {
+  generatedResearchResultSchema,
+  researchResultSchema,
+  type ResearchResult
+} from "./schemas";
+import type {
+  AnalogyArtifact,
+  ApplicationArtifact,
+  ChatMessage,
+  FounderOpportunity,
+  ParallelArtifact,
+  PedagogicalClaim,
+  ResearchArtifacts,
+  ResearchDepth,
+  SourceArtifact,
+  TurnSummary,
+  UnexploredArtifact
+} from "./types";
 
 type ResearchInput = {
   apiKey: string;
@@ -9,6 +25,8 @@ type ResearchInput = {
   priorArtifacts?: ResearchArtifacts | null;
   priorTurnSummaries?: TurnSummary[];
   crossDomainBlock?: string;
+  depth?: ResearchDepth;
+  forceFounderMode?: boolean;
 };
 
 export type StreamEvent =
@@ -19,23 +37,25 @@ const DEFAULT_MODEL = "gpt-5.2";
 const SEPARATOR = "<<<ARTIFACTS>>>";
 
 const INSTRUCTIONS = [
-  "You are Michelangelo, a careful research assistant.",
-  "You are in an ongoing research session with the user.",
-  "Prior turns and prior artifacts from this session are included below.",
-  "Build on them. Do not restart from scratch on each turn.",
-  "When the user asks a follow-up, extend existing insights and sources where they apply — reference prior source IDs (e.g. src-1) rather than renaming them.",
-  "Only introduce new sources or insights when the current question genuinely requires them.",
+  "You are Michelangelo — a conversation-first concept studio for durable understanding.",
+  "You help users understand concepts from computer science, information theory, and mathematics.",
+  "You are not a source notebook. Sources are evidence in service of explanation, not the main object of the interface.",
+  "Prior turns and prior artifacts from this session are included below; enrich them across turns.",
+  "Do not restart from scratch unless the user asks for a new direction.",
+  "If a follow-up is narrow, update only the sections that genuinely improve and leave the rest effectively unchanged.",
+  "Keep explanations simple without dumbing them down.",
   "Use web search when useful. Sources must be real URLs.",
-  "Do not overstate analogies. Every insight needs a caveat.",
-  "Every insight needs a short list of concepts (kebab-case subjects, ≤5) — the cross-domain primitives that link this work to prior/future sessions.",
-  "Mark EXACTLY ONE insight in the turn with `staked: true` — the single claim you would stake the turn on. All others: `staked: false`.",
-  "When an insight's evidenceLevel is \"direct\", include a `supportingQuote` (≤200 chars) that is a VERBATIM substring of one of its cited sources' `excerpt` fields. Otherwise omit supportingQuote.",
+  "Favor interdisciplinary transfer and one vivid explanatory move when it clarifies the idea.",
+  "Do not force analogies or parallels; only include ones that truly fit.",
+  "Always include 2-10 kebab-case concepts for cross-session memory linking.",
   "",
   "Writing style for the answer (before the marker):",
-  "  - The FIRST sentence must be the single strongest conclusion — written as a standalone claim, in the voice of a research essay. It should match the staked insight's claim in substance.",
-  "  - After the lead sentence, 2–5 sentences of elaboration that weave the secondary insights into prose. Do not enumerate insights as bullets.",
-  "  - Cite sources inline using bracket marks like [src-1] immediately after the clause they support. Use the same source IDs you define in the JSON tail. Multiple citations on one clause: [src-1][src-2].",
-  "  - Tone is a careful essayist, not a chatbot. No markdown. No headings. No bullet lists.",
+  "  - Open with a framing line or hook that captures the idea.",
+  "  - Continue with 2 to 4 short paragraphs of teacherly prose.",
+  "  - Blend intuition, mechanism, and implications. Use one concrete analogy, scene, or example when it genuinely helps.",
+  "  - End by pointing toward a frontier, consequence, or unresolved tension when useful.",
+  "  - Cite sources inline using bracket marks like [src-1] immediately after supported clauses.",
+  "  - Tone is precise, imaginative, and clear. No headings. No bullet lists. Paragraph breaks are good.",
   "",
   "Respond in TWO PARTS, in this exact order:",
   "  1. The answer as described above. No markdown, no JSON.",
@@ -45,17 +65,44 @@ const INSTRUCTIONS = [
   "{",
   "  \"artifacts\": {",
   "    \"summary\": { \"title\": \"short title\", \"framing\": \"plain-language framing\" },",
+  "    \"core\": { \"essence\": \"...\", \"explanation\": \"...\" },",
+  "    \"analogies\": [ { \"id\": \"ana-1\", \"title\": \"...\", \"description\": \"...\", \"whyItWorks\": \"...\" } ],",
+  "    \"parallels\": [ { \"id\": \"par-1\", \"domain\": \"economics\", \"concept\": \"...\", \"connection\": \"...\", \"caveat\": \"optional\" } ],",
+  "    \"applications\": [ { \"id\": \"app-1\", \"domain\": \"medicine\", \"use\": \"...\", \"example\": \"...\" } ],",
+  "    \"unexplored\": [ { \"id\": \"unx-1\", \"idea\": \"...\", \"whyItMatters\": \"...\", \"suggestedNextStep\": \"optional\" } ],",
+  "    \"claims\": [ { \"id\": \"clm-1\", \"claim\": \"short claim\" } ],",
+  "    \"concepts\": [\"signal-to-noise\", \"feedback-loops\"],",
   "    \"sources\": [ { \"id\": \"src-1\", \"title\": \"...\", \"url\": \"https://...\", \"excerpt\": \"...\", \"reason\": \"...\" } ],",
-  "    \"insights\": [ { \"id\": \"ins-1\", \"claim\": \"...\", \"evidenceLevel\": \"direct|strong|tentative|speculative\", \"sourceIds\": [\"src-1\"], \"caveat\": \"...\", \"concepts\": [\"concept-a\", \"concept-b\"], \"staked\": false, \"supportingQuote\": \"optional verbatim excerpt\" } ],",
-  "    \"caveats\":  [ { \"id\": \"cav-1\", \"text\": \"...\", \"severity\": \"low|medium|high\" } ]",
+  "    \"founderMode\": {",
+  "      \"opportunities\": [",
+  "        {",
+  "          \"id\": \"opp-1\", \"productIdea\": \"...\", \"targetUser\": \"...\", \"painPoint\": \"...\",",
+  "          \"oneWeekMvp\": \"...\", \"successSignal\": \"...\", \"failureMode\": \"...\", \"nextExperiment\": \"...\"",
+  "        }",
+  "      ]",
+  "    }",
   "  },",
   "  \"compact\": {",
   "    \"gist\": \"one-line human-readable reminder of what this turn was about (≤280 chars)\",",
   "    \"keyClaims\": [\"≤4 short phrases, each ≤140 chars\"]",
   "  }",
   "}",
-  "Use 3 to 5 sources, 3 to 5 insights, 2 to 4 caveats."
+  "Treat the artifacts as a stable workspace: preserve strong prior material, add only what this turn improves, and avoid low-value repetition.",
+  "Use 3 to 5 sources, 2 to 5 analogies, 3 to 5 parallels, 3 to 5 applications, and 2 to 4 unexplored items when they are warranted by the turn."
 ].join("\n");
+
+const DEPTH_SUFFIX: Record<ResearchDepth, string> = {
+  quick:
+    "\n\nDepth: QUICK pass. Aim for 2 short paragraphs, 2-3 sources, and only the artifact sections that genuinely add value. Skip lists that would be filler.",
+  standard: "",
+  deep:
+    "\n\nDepth: DEEP pass. Surface tensions and contrasting frames. Push for 4 short paragraphs, 4-5 strong sources, and at least 2 unexplored threads with concrete next steps. Prefer interdisciplinary parallels over restating the obvious."
+};
+
+function instructionsForDepth(depth: ResearchDepth | undefined): string {
+  if (!depth || depth === "standard") return INSTRUCTIONS;
+  return INSTRUCTIONS + DEPTH_SUFFIX[depth];
+}
 
 /**
  * Stream a research turn. Yields answer deltas as the model writes the plain-text
@@ -78,7 +125,7 @@ export async function* streamResearchResult(input: ResearchInput): AsyncGenerato
     model: process.env.OPENAI_MODEL || DEFAULT_MODEL,
     tools: [{ type: "web_search" }],
     tool_choice: "auto",
-    instructions: INSTRUCTIONS,
+    instructions: instructionsForDepth(input.depth),
     input: buildPrompt(input)
   });
 
@@ -141,8 +188,14 @@ export async function* streamResearchResult(input: ResearchInput): AsyncGenerato
       }
     : parsed;
 
-  const parsedResult = researchResultSchema.parse(combined);
-  const result = enforceStakedAndGrounding(parsedResult);
+  const generated = generatedResearchResultSchema.parse(combined);
+  const result = researchResultSchema.parse(
+    mergeResearchResult(generated, {
+      priorArtifacts: input.priorArtifacts,
+      prompt: input.prompt,
+      forceFounderMode: input.forceFounderMode
+    })
+  );
 
   // If the client never saw answer deltas (fallback path), flush the final answer now.
   if (!inAnswer || answerText) {
@@ -183,7 +236,7 @@ function buildPrompt(input: ResearchInput): string {
     })
     .join("\n\n");
 
-  const artifacts = input.priorArtifacts ? JSON.stringify(input.priorArtifacts).slice(0, 4000) : "";
+  const artifacts = input.priorArtifacts ? JSON.stringify(input.priorArtifacts).slice(0, 12_000) : "";
 
   const crossDomain = input.crossDomainBlock ? `\n${input.crossDomainBlock}\n` : "";
 
@@ -191,7 +244,7 @@ function buildPrompt(input: ResearchInput): string {
 Compact summaries of older turns (use for context, not to replace):
 ${summaries || "None."}
 
-Full artifacts from the most recent turn (extend these rather than replacing them when the follow-up applies):
+Full artifacts from the current right-rail workspace (extend these rather than replacing them when the follow-up applies):
 ${artifacts || "None"}
 
 Session transcript (prior turns only):
@@ -202,6 +255,52 @@ ${input.prompt}
 `;
 }
 
+export function mergeResearchResult(
+  generated: ResearchResult,
+  input: Pick<ResearchInput, "priorArtifacts" | "prompt" | "forceFounderMode">
+): ResearchResult {
+  const prior = input.priorArtifacts;
+  if (!prior) {
+    if (!input.forceFounderMode && generated.artifacts.founderMode && !isFounderModePrompt(input.prompt)) {
+      return {
+        ...generated,
+        artifacts: { ...generated.artifacts, founderMode: undefined }
+      };
+    }
+    return generated;
+  }
+
+  const { sources, sourceIdMap } = mergeSources(prior.sources, generated.artifacts.sources);
+  const answer = remapSourceCitations(generated.answer, sourceIdMap);
+  const shouldReframe = shouldRefreshCoreWorkspace(input.prompt, prior, generated.artifacts);
+  const founderOriented = input.forceFounderMode === true || isFounderModePrompt(input.prompt);
+
+  return {
+    ...generated,
+    answer,
+    artifacts: {
+      summary: shouldReframe ? generated.artifacts.summary : prior.summary,
+      core: shouldReframe ? generated.artifacts.core : prior.core,
+      analogies: mergeAnalogies(prior.analogies, generated.artifacts.analogies),
+      parallels: mergeParallels(prior.parallels, generated.artifacts.parallels),
+      applications: mergeApplications(prior.applications, generated.artifacts.applications),
+      unexplored: mergeUnexplored(prior.unexplored, generated.artifacts.unexplored),
+      claims: mergeClaims(prior.claims, generated.artifacts.claims),
+      concepts: mergeConcepts(prior.concepts, generated.artifacts.concepts),
+      sources,
+      founderMode:
+        founderOriented && generated.artifacts.founderMode
+          ? {
+              opportunities: mergeFounderOpportunities(
+                prior.founderMode?.opportunities ?? [],
+                generated.artifacts.founderMode.opportunities
+              )
+            }
+          : prior.founderMode
+    }
+  };
+}
+
 function isMockMode(apiKey: string): boolean {
   return process.env.MOCK_MODEL === "true" || apiKey === "sk-mock";
 }
@@ -209,12 +308,115 @@ function isMockMode(apiKey: string): boolean {
 function mockResearchResult(prompt: string): ResearchResult {
   return {
     answer:
-      "The smallest proof of a research workspace is chat plus durable artifacts, not a full visual atlas [src-1]. From that base, user-owned API keys quietly reduce launch friction for a private MVP [src-1], and the structured output becomes the product surface that distinguishes the app from generic chat [src-2]. The rest is scaffolding — persistence, streaming, and a careful schema [src-3].",
+      "A concept becomes durable when it stops feeling like a definition and starts behaving like a tool [src-1][src-2].\n\nMichelangelo should therefore teach by translation: explain the mechanism plainly, carry it into a concrete scene, then show how the same structure reappears in other domains [src-3]. That is how an abstract idea becomes something a user can notice and reuse.\n\nThe point is not to build a source notebook. The point is to help a conversation accumulate into a sharper mental model, with applications and open questions that keep the idea alive after the turn ends [src-1].",
     artifacts: {
       summary: {
         title: prompt.slice(0, 80) || "Research question",
         framing:
-          "The useful MVP question is whether chat can reliably produce structured, inspectable research artifacts rather than a disposable answer."
+          "Great concept learning blends clarity, analogy, interdisciplinary transfer, and actionable experimentation."
+      },
+      core: {
+        essence:
+          "The best way to learn theory is to translate one abstract mechanism into many concrete contexts.",
+        explanation:
+          "When users can restate the concept plainly, recognize it in everyday systems, and apply it to real decisions, the theory becomes usable knowledge."
+      },
+      analogies: [
+        {
+          id: "ana-1",
+          title: "Kitchen prep board",
+          description:
+            "A prep board groups ingredients by what dish they become, not by where they were bought.",
+          whyItWorks:
+            "This mirrors concept learning: organize by transferable function, not by textbook chapter."
+        },
+        {
+          id: "ana-2",
+          title: "Subway transfer map",
+          description:
+            "A subway map highlights transfer stations where routes intersect and choices expand.",
+          whyItWorks:
+            "Concepts with many cross-domain links are transfer stations for reasoning."
+        }
+      ],
+      parallels: [
+        {
+          id: "par-1",
+          domain: "economics",
+          concept: "marginal analysis",
+          connection: "Both systems improve when decisions are made on incremental impact, not totals."
+        },
+        {
+          id: "par-2",
+          domain: "history",
+          concept: "path dependence",
+          connection:
+            "Early choices constrain future options in institutions and in technical systems alike.",
+          caveat: "Human institutions also change from politics and culture, not only formal rules."
+        },
+        {
+          id: "par-3",
+          domain: "linguistics",
+          concept: "compression in language",
+          connection:
+            "Both language and information systems encode frequent patterns efficiently."
+        }
+      ],
+      applications: [
+        {
+          id: "app-1",
+          domain: "product",
+          use: "prioritization under uncertainty",
+          example:
+            "Choose roadmap experiments by expected information gain instead of loudest stakeholder demand."
+        },
+        {
+          id: "app-2",
+          domain: "healthcare",
+          use: "clinical triage",
+          example: "Tune thresholds by balancing false positives against missed urgent cases."
+        },
+        {
+          id: "app-3",
+          domain: "education",
+          use: "curriculum sequencing",
+          example: "Teach by concept dependency graph so each lesson unlocks multiple later topics."
+        }
+      ],
+      unexplored: [
+        {
+          id: "unx-1",
+          idea: "Which theoretical concepts are underused in startup discovery?",
+          whyItMatters: "Undervalued concept frames can create strategic advantage.",
+          suggestedNextStep: "Audit ten roadmap decisions and classify the reasoning model used."
+        },
+        {
+          id: "unx-2",
+          idea: "Can one shared concept map align engineering, design, and GTM decisions?",
+          whyItMatters: "Shared abstractions reduce translation loss across functions."
+        }
+      ],
+      claims: [
+        {
+          id: "clm-1",
+          claim:
+            "Concept exploration becomes sticky when each turn ends with concrete applications and next experiments."
+        }
+      ],
+      concepts: ["concept-transfer", "cross-domain-mapping", "experimental-thinking"],
+      founderMode: {
+        opportunities: [
+          {
+            id: "opp-1",
+            productIdea: "Theory-to-MVP copilot",
+            targetUser: "early-stage founders",
+            painPoint: "Good ideas stall between intellectual insight and execution.",
+            oneWeekMvp: "Generate one experiment-ready brief from a concept each day.",
+            successSignal: "At least 3 concept-derived experiments launched in a week.",
+            failureMode: "Outputs may stay generic without concrete market context.",
+            nextExperiment: "Pilot with 5 founders and compare launch cadence versus baseline."
+          }
+        ]
       },
       sources: [
         {
@@ -238,48 +440,6 @@ function mockResearchResult(prompt: string): ResearchResult {
           excerpt: "Postgres stores relational records for sessions, messages, and artifacts.",
           reason: "It anchors persistence."
         }
-      ],
-      insights: [
-        {
-          id: "ins-1",
-          claim: "The smallest proof is chat plus durable artifacts, not a full visual atlas.",
-          evidenceLevel: "strong",
-          sourceIds: ["src-1", "src-2"],
-          caveat: "A mocked provider proves UI flow, but not research quality.",
-          concepts: ["research-artifacts", "mvp-scope"],
-          staked: true
-        },
-        {
-          id: "ins-2",
-          claim: "User-owned API keys reduce launch friction for a private MVP.",
-          evidenceLevel: "tentative",
-          sourceIds: ["src-1"],
-          caveat: "The UX must be explicit that keys are never stored server-side.",
-          concepts: ["byok", "launch-friction"],
-          staked: false
-        },
-        {
-          id: "ins-3",
-          claim: "Artifacts should be the product surface that distinguishes this from generic chat.",
-          evidenceLevel: "direct",
-          sourceIds: ["src-1"],
-          caveat: "The schema must stay simple enough for reliable model output.",
-          supportingQuote: "Responses can generate model output",
-          concepts: ["product-surface", "structured-output"],
-          staked: false
-        }
-      ],
-      caveats: [
-        {
-          id: "cav-1",
-          text: "Citation quality depends on the model and search provider.",
-          severity: "high"
-        },
-        {
-          id: "cav-2",
-          text: "No app-level authentication exists in the MVP; deployment protection handles private access.",
-          severity: "medium"
-        }
       ]
     },
     compact: {
@@ -290,57 +450,6 @@ function mockResearchResult(prompt: string): ResearchResult {
         "Artifacts are the product surface"
       ]
     }
-  };
-}
-
-/**
- * Post-parse invariants:
- *  - Exactly one insight has staked = true. If zero or multiple, pick the first
- *    direct/strong insight or fall back to the first.
- *  - For evidenceLevel === "direct": supportingQuote must be a verbatim substring
- *    of at least one cited source's excerpt. If not, downgrade to "tentative"
- *    and drop the quote.
- */
-export function enforceStakedAndGrounding(result: ResearchResult): ResearchResult {
-  const insights = result.artifacts.insights.map((insight) => ({ ...insight })) as InsightArtifact[];
-  const sources = result.artifacts.sources;
-  const sourceById = new Map(sources.map((source) => [source.id, source]));
-
-  for (const insight of insights) {
-    if (insight.evidenceLevel !== "direct") {
-      delete insight.supportingQuote;
-      continue;
-    }
-    const quote = insight.supportingQuote?.trim();
-    if (!quote) {
-      insight.evidenceLevel = "tentative";
-      continue;
-    }
-    const grounded = insight.sourceIds.some((id) => {
-      const src = sourceById.get(id);
-      return src ? src.excerpt.includes(quote) : false;
-    });
-    if (!grounded) {
-      insight.evidenceLevel = "tentative";
-      delete insight.supportingQuote;
-    }
-  }
-
-  const staked = insights.filter((insight) => insight.staked);
-  if (staked.length !== 1) {
-    insights.forEach((insight) => {
-      insight.staked = false;
-    });
-    const pick =
-      insights.find((insight) => insight.evidenceLevel === "direct") ??
-      insights.find((insight) => insight.evidenceLevel === "strong") ??
-      insights[0];
-    if (pick) pick.staked = true;
-  }
-
-  return {
-    ...result,
-    artifacts: { ...result.artifacts, insights }
   };
 }
 
@@ -375,4 +484,271 @@ function chunkText(text: string): string[] {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const MAX_ITEMS = {
+  analogies: 8,
+  parallels: 8,
+  applications: 8,
+  unexplored: 8,
+  claims: 12,
+  concepts: 16,
+  sources: 16,
+  founderOpportunities: 6
+} as const;
+
+function shouldRefreshCoreWorkspace(
+  prompt: string,
+  prior: ResearchArtifacts,
+  next: ResearchArtifacts
+): boolean {
+  const normalizedPrompt = normalizeText(prompt);
+  if (
+    /(reframe|rethink|reinterpret|zoom out|big picture|broader|broaden|compare|versus|vs\.?|difference|relationship between|instead|not just|from the perspective|through the lens|step back)/.test(
+      normalizedPrompt
+    )
+  ) {
+    return true;
+  }
+
+  const priorConcepts = new Set(prior.concepts.map((concept) => concept.toLowerCase()));
+  const nextConcepts = new Set(next.concepts.map((concept) => concept.toLowerCase()));
+  const overlap = [...nextConcepts].filter((concept) => priorConcepts.has(concept)).length;
+  const union = new Set([...priorConcepts, ...nextConcepts]).size;
+  const overlapRatio = union === 0 ? 1 : overlap / union;
+
+  return overlapRatio < 0.35 && normalizeText(prior.summary.title) !== normalizeText(next.summary.title);
+}
+
+function isFounderModePrompt(prompt: string): boolean {
+  return /\b(founder|startup|product|mvp|go[- ]to[- ]market|gtm|pricing|customer|user acquisition|distribution|venture|saas|business model)\b/i.test(
+    prompt
+  );
+}
+
+function mergeAnalogies(prior: AnalogyArtifact[], next: AnalogyArtifact[]): AnalogyArtifact[] {
+  return mergeItems(prior, next, {
+    max: MAX_ITEMS.analogies,
+    prefix: "ana",
+    key: (item) => `${normalizeText(item.title)}|${normalizeText(item.description)}`,
+    merge: (existing, incoming) => ({
+      ...existing,
+      title: preferRicherRequired(existing.title, incoming.title),
+      description: preferRicherRequired(existing.description, incoming.description),
+      whyItWorks: preferRicherRequired(existing.whyItWorks, incoming.whyItWorks)
+    })
+  });
+}
+
+function mergeParallels(prior: ParallelArtifact[], next: ParallelArtifact[]): ParallelArtifact[] {
+  return mergeItems(prior, next, {
+    max: MAX_ITEMS.parallels,
+    prefix: "par",
+    key: (item) => `${normalizeText(item.domain)}|${normalizeText(item.concept)}`,
+    merge: (existing, incoming) => ({
+      ...existing,
+      connection: preferRicherRequired(existing.connection, incoming.connection),
+      caveat: preferRicher(existing.caveat, incoming.caveat),
+      domain: preferRicherRequired(existing.domain, incoming.domain),
+      concept: preferRicherRequired(existing.concept, incoming.concept)
+    })
+  });
+}
+
+function mergeApplications(
+  prior: ApplicationArtifact[],
+  next: ApplicationArtifact[]
+): ApplicationArtifact[] {
+  return mergeItems(prior, next, {
+    max: MAX_ITEMS.applications,
+    prefix: "app",
+    key: (item) => `${normalizeText(item.domain)}|${normalizeText(item.use)}`,
+    merge: (existing, incoming) => ({
+      ...existing,
+      domain: preferRicherRequired(existing.domain, incoming.domain),
+      use: preferRicherRequired(existing.use, incoming.use),
+      example: preferRicherRequired(existing.example, incoming.example)
+    })
+  });
+}
+
+function mergeUnexplored(
+  prior: UnexploredArtifact[],
+  next: UnexploredArtifact[]
+): UnexploredArtifact[] {
+  return mergeItems(prior, next, {
+    max: MAX_ITEMS.unexplored,
+    prefix: "unx",
+    key: (item) => normalizeText(item.idea),
+    merge: (existing, incoming) => ({
+      ...existing,
+      idea: preferRicherRequired(existing.idea, incoming.idea),
+      whyItMatters: preferRicherRequired(existing.whyItMatters, incoming.whyItMatters),
+      suggestedNextStep: preferRicher(existing.suggestedNextStep, incoming.suggestedNextStep)
+    })
+  });
+}
+
+function mergeClaims(prior: PedagogicalClaim[], next: PedagogicalClaim[]): PedagogicalClaim[] {
+  return mergeItems(prior, next, {
+    max: MAX_ITEMS.claims,
+    prefix: "clm",
+    key: (item) => normalizeText(item.claim),
+    merge: (existing, incoming) => ({
+      ...existing,
+      claim: preferRicherRequired(existing.claim, incoming.claim)
+    })
+  });
+}
+
+function mergeFounderOpportunities(
+  prior: FounderOpportunity[],
+  next: FounderOpportunity[]
+): FounderOpportunity[] {
+  return mergeItems(prior, next, {
+    max: MAX_ITEMS.founderOpportunities,
+    prefix: "opp",
+    key: (item) => `${normalizeText(item.productIdea)}|${normalizeText(item.targetUser)}`,
+    merge: (existing, incoming) => ({
+      ...existing,
+      productIdea: preferRicherRequired(existing.productIdea, incoming.productIdea),
+      targetUser: preferRicherRequired(existing.targetUser, incoming.targetUser),
+      painPoint: preferRicherRequired(existing.painPoint, incoming.painPoint),
+      oneWeekMvp: preferRicherRequired(existing.oneWeekMvp, incoming.oneWeekMvp),
+      successSignal: preferRicherRequired(existing.successSignal, incoming.successSignal),
+      failureMode: preferRicherRequired(existing.failureMode, incoming.failureMode),
+      nextExperiment: preferRicherRequired(existing.nextExperiment, incoming.nextExperiment)
+    })
+  });
+}
+
+function mergeConcepts(prior: string[], next: string[]): string[] {
+  const merged: string[] = [];
+  const seen = new Set<string>();
+  for (const concept of [...prior, ...next]) {
+    const normalized = concept.trim().toLowerCase();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    merged.push(concept.trim());
+    if (merged.length >= MAX_ITEMS.concepts) break;
+  }
+  return merged;
+}
+
+function mergeSources(
+  prior: SourceArtifact[],
+  next: SourceArtifact[]
+): { sources: SourceArtifact[]; sourceIdMap: Map<string, string> } {
+  const merged = prior.map((source) => ({ ...source }));
+  const byKey = new Map(merged.map((source) => [sourceIdentity(source), source]));
+  const usedIds = new Set(merged.map((source) => source.id));
+  const sourceIdMap = new Map<string, string>();
+
+  for (const source of next) {
+    const key = sourceIdentity(source);
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.title = preferRicherRequired(existing.title, source.title);
+      existing.excerpt = preferRicherRequired(existing.excerpt, source.excerpt);
+      existing.reason = preferRicherRequired(existing.reason, source.reason);
+      sourceIdMap.set(source.id, existing.id);
+      continue;
+    }
+
+    const nextId = ensureUniqueId("src", source.id, usedIds);
+    const item = { ...source, id: nextId };
+    merged.push(item);
+    byKey.set(key, item);
+    usedIds.add(nextId);
+    sourceIdMap.set(source.id, nextId);
+    if (merged.length >= MAX_ITEMS.sources) break;
+  }
+
+  return { sources: merged, sourceIdMap };
+}
+
+function remapSourceCitations(answer: string, sourceIdMap: Map<string, string>): string {
+  if (sourceIdMap.size === 0) return answer;
+  return answer.replace(/\[(src-[\w-]+)\]/g, (full, srcId: string) => {
+    const mapped = sourceIdMap.get(srcId);
+    return mapped ? `[${mapped}]` : full;
+  });
+}
+
+function mergeItems<T extends { id: string }>(
+  prior: T[],
+  next: T[],
+  options: {
+    max: number;
+    prefix: string;
+    key: (item: T) => string;
+    merge: (existing: T, incoming: T) => T;
+  }
+): T[] {
+  const merged = prior.map((item) => ({ ...item }));
+  const byKey = new Map<string, T>();
+  const usedIds = new Set<string>();
+
+  for (const item of merged) {
+    byKey.set(options.key(item), item);
+    usedIds.add(item.id);
+  }
+
+  for (const incoming of next) {
+    const key = options.key(incoming);
+    const existing = byKey.get(key);
+    if (existing) {
+      Object.assign(existing, options.merge(existing, incoming));
+      continue;
+    }
+
+    const nextId = ensureUniqueId(options.prefix, incoming.id, usedIds);
+    const item = { ...incoming, id: nextId };
+    merged.push(item);
+    byKey.set(key, item);
+    usedIds.add(nextId);
+    if (merged.length >= options.max) break;
+  }
+
+  return merged;
+}
+
+function ensureUniqueId(prefix: string, desiredId: string, usedIds: Set<string>): string {
+  if (!usedIds.has(desiredId)) return desiredId;
+  let counter = usedIds.size + 1;
+  let candidate = `${prefix}-${counter}`;
+  while (usedIds.has(candidate)) {
+    counter += 1;
+    candidate = `${prefix}-${counter}`;
+  }
+  return candidate;
+}
+
+function sourceIdentity(source: SourceArtifact): string {
+  return normalizeUrl(source.url);
+}
+
+function normalizeUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    parsed.search = "";
+    return parsed.toString().replace(/\/$/, "").toLowerCase();
+  } catch {
+    return normalizeText(url);
+  }
+}
+
+function preferRicher(current?: string, incoming?: string): string | undefined {
+  if (!incoming?.trim()) return current;
+  if (!current?.trim()) return incoming.trim();
+  return incoming.trim().length > current.trim().length ? incoming.trim() : current.trim();
+}
+
+function preferRicherRequired(current: string, incoming?: string): string {
+  return preferRicher(current, incoming) ?? current;
+}
+
+function normalizeText(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, " ").replace(/[^\w\s-]/g, "").trim();
 }

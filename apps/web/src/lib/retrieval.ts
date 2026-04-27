@@ -22,6 +22,7 @@ export type ConceptSpan = {
 
 type RetrievalInput = {
   apiKey: string;
+  owner: string;
   userPrompt: string;
   currentSessionId: string;
   pool?: Pool;
@@ -41,7 +42,7 @@ export async function retrieveCrossDomainContext(
   input: RetrievalInput
 ): Promise<CrossDomainHit[]> {
   try {
-    const { apiKey, userPrompt, currentSessionId, pool, hasVector } = input;
+    const { apiKey, owner, userPrompt, currentSessionId, pool, hasVector } = input;
     if (!pool) return [];
 
     let conceptIds: string[] = [];
@@ -51,11 +52,18 @@ export async function retrieveCrossDomainContext(
       if (embedding) {
         const vectorLiteral = `[${embedding.join(",")}]`;
         const result = await pool.query<{ id: string }>(
-          `select id from concepts
-             where embedding is not null
-             order by embedding <=> $1::vector
-             limit $2`,
-          [vectorLiteral, TOP_K]
+          `select c.id
+             from concepts c
+            where c.embedding is not null
+              and exists (
+                select 1
+                  from concept_mentions cm
+                  join sessions s on s.id = cm.session_id
+                 where cm.concept_id = c.id and s.owner = $2
+              )
+             order by c.embedding <=> $1::vector
+             limit $3`,
+          [vectorLiteral, owner, TOP_K]
         );
         conceptIds = result.rows.map((row) => row.id);
       }
@@ -63,11 +71,18 @@ export async function retrieveCrossDomainContext(
 
     if (conceptIds.length === 0) {
       const result = await pool.query<{ id: string; label: string }>(
-        `select id, label from concepts
-           where position(lower(label) in lower($1)) > 0
-           order by mention_count desc
-           limit $2`,
-        [userPrompt, TOP_K]
+        `select c.id, c.label
+           from concepts c
+          where position(lower(c.label) in lower($2)) > 0
+            and exists (
+              select 1
+                from concept_mentions cm
+                join sessions s on s.id = cm.session_id
+               where cm.concept_id = c.id and s.owner = $1
+            )
+          order by c.mention_count desc
+          limit $3`,
+        [owner, userPrompt, TOP_K]
       );
       conceptIds = result.rows.map((row) => row.id);
     }
@@ -82,12 +97,13 @@ export async function retrieveCrossDomainContext(
         insight_id: string;
         turn_index: number;
       }>(
-        `select session_id, insight_id, turn_index
-           from concept_mentions
-          where concept_id = $1 and session_id <> $2
-          order by created_at desc
-          limit $3`,
-        [conceptId, currentSessionId, PER_CONCEPT_INSIGHTS]
+        `select cm.session_id, cm.insight_id, cm.turn_index
+           from concept_mentions cm
+           join sessions s on s.id = cm.session_id
+          where cm.concept_id = $1 and cm.session_id <> $2 and s.owner = $3
+          order by cm.created_at desc
+          limit $4`,
+        [conceptId, currentSessionId, owner, PER_CONCEPT_INSIGHTS]
       );
 
       for (const mention of mentionRows.rows) {
@@ -209,7 +225,7 @@ export async function backfillConceptEmbeddings(
 
 async function lookupClaim(pool: Pool, sessionId: string, insightId: string): Promise<string | null> {
   const result = await pool.query<{ content_json: { id: string; claim: string }[] }>(
-    `select content_json from artifacts where session_id = $1 and type = 'insights' limit 1`,
+    `select content_json from artifacts where session_id = $1 and type = 'claims' limit 1`,
     [sessionId]
   );
   const insights = result.rows[0]?.content_json ?? [];

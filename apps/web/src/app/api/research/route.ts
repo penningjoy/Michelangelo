@@ -1,6 +1,7 @@
-import { z } from "zod";
 import { streamResearchResult } from "../../../lib/provider";
 import type { ResearchResult } from "../../../lib/schemas";
+import { researchArtifactsSchema, researchRequestSchema } from "../../../lib/schemas";
+import { requireDemoPrincipal } from "../../../lib/demoAccess";
 import { getServerOpenAiKey } from "../../../lib/serverOpenAiKey";
 import {
   addMessage,
@@ -27,19 +28,19 @@ import type { ResearchArtifacts, ResearchEvent } from "../../../lib/types";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const requestSchema = z.object({
-  apiKey: z.string().optional(),
-  prompt: z.string().min(2).max(6000),
-  sessionId: z.string().optional()
-});
-
 export async function POST(request: Request) {
-  const parsed = requestSchema.safeParse(await request.json().catch(() => null));
+  const access = requireDemoPrincipal(request);
+  if (!access.ok) {
+    return Response.json({ error: access.error }, { status: access.status });
+  }
+
+  const parsed = researchRequestSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) {
     return Response.json({ error: "A valid prompt is required." }, { status: 400 });
   }
 
-  const { prompt, sessionId } = parsed.data;
+  const principal = access.principal;
+  const { prompt, sessionId, depth, forceFounderMode } = parsed.data;
   const clientKey = parsed.data.apiKey?.trim();
   const effectiveKey = clientKey || getServerOpenAiKey();
   if (!effectiveKey) {
@@ -57,8 +58,8 @@ export async function POST(request: Request) {
 
       try {
         const session = sessionId
-          ? await getSession(sessionId)
-          : await createSession(titleFromPrompt(prompt));
+          ? await getSession(sessionId, principal)
+          : await createSession(titleFromPrompt(prompt), principal);
 
         if (!session) {
           send({ type: "error", message: "Unknown session." });
@@ -70,9 +71,9 @@ export async function POST(request: Request) {
 
         // Capture strictly prior turns BEFORE persisting the current user prompt,
         // so the provider isn't given the current question twice.
-        const priorMessages = await listMessages(session.id);
-        const priorArtifacts = artifactsFromRows(await listArtifacts(session.id));
-        const priorTurnSummaries = await listTurnSummaries(session.id);
+        const priorMessages = await listMessages(session.id, principal);
+        const priorArtifacts = artifactsFromRows(await listArtifacts(session.id, principal));
+        const priorTurnSummaries = await listTurnSummaries(session.id, principal);
         const turnIndex = priorTurnSummaries.length + 1;
 
         send({ type: "status", message: "Saving prompt..." });
@@ -81,6 +82,7 @@ export async function POST(request: Request) {
         send({ type: "status", message: "Looking for related concepts from prior sessions..." });
         const crossDomainHits = await retrieveCrossDomainContext({
           apiKey: effectiveKey,
+          owner: principal,
           userPrompt: prompt,
           currentSessionId: session.id,
           pool: getPoolIfAvailable() ?? undefined,
@@ -98,7 +100,9 @@ export async function POST(request: Request) {
           priorMessages,
           priorArtifacts,
           priorTurnSummaries,
-          crossDomainBlock
+          crossDomainBlock,
+          depth,
+          forceFounderMode
         })) {
           if (event.type === "answer-delta") {
             send({ type: "delta", text: event.text });
@@ -117,10 +121,10 @@ export async function POST(request: Request) {
 
         const compact = finalResult.compact ?? {
           gist: finalResult.answer.slice(0, 240),
-          keyClaims: finalResult.artifacts.insights.slice(0, 4).map((insight) => insight.claim)
+          keyClaims: finalResult.artifacts.claims.slice(0, 4).map((claim) => claim.claim)
         };
         const conceptsByInsight = Object.fromEntries(
-          finalResult.artifacts.insights.map((insight) => [insight.id, insight.concepts])
+          finalResult.artifacts.claims.map((claim) => [claim.id, finalResult.artifacts.concepts])
         );
 
         await persistTurn(session.id, {
@@ -162,7 +166,7 @@ export async function POST(request: Request) {
         // in Neo4j so the brain map shows them immediately — regardless of
         // whether the curator (next block) proposes any edges for them.
         const allConceptSlugs = Array.from(
-          new Set(finalResult.artifacts.insights.flatMap((insight) => insight.concepts))
+          new Set(finalResult.artifacts.concepts)
         );
         void upsertConcepts(allConceptSlugs);
 
@@ -177,20 +181,21 @@ export async function POST(request: Request) {
         if (pool) {
           const turnConcepts: TurnConcept[] = [];
           const seen = new Set<string>();
-          for (const insight of finalResult.artifacts.insights) {
-            for (const concept of insight.concepts) {
+          for (const claim of finalResult.artifacts.claims) {
+            for (const concept of finalResult.artifacts.concepts) {
               if (seen.has(concept)) continue;
               seen.add(concept);
               turnConcepts.push({
                 id: concept,
                 label: concept,
-                currentClaim: insight.claim,
-                currentInsightId: insight.id
+                currentClaim: claim.claim,
+                currentInsightId: claim.id
               });
             }
           }
           void runCurator({
             apiKey: effectiveKey,
+            owner: principal,
             sessionId: session.id,
             turnConcepts,
             pool,
@@ -221,19 +226,11 @@ function artifactsFromRows(
 ): ResearchArtifacts | null {
   if (rows.length === 0) return null;
   const partial = Object.fromEntries(rows.map((row) => [row.type, row.content]));
-  if (
-    partial.summary &&
-    partial.sources &&
-    partial.insights &&
-    partial.caveats
-  ) {
-    return partial as ResearchArtifacts;
-  }
-  return null;
+  const parsed = researchArtifactsSchema.safeParse(partial);
+  return parsed.success ? parsed.data : null;
 }
 
 function titleFromPrompt(prompt: string): string {
   const firstLine = prompt.split("\n").find(Boolean) ?? "Untitled research";
   return firstLine.length > 72 ? `${firstLine.slice(0, 69)}...` : firstLine;
 }
-

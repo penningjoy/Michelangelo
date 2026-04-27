@@ -203,6 +203,41 @@ export async function getProposedEdges(limit = 50): Promise<ProposedEdge[]> {
   return result ?? [];
 }
 
+export async function getEdgeById(edgeId: string): Promise<ProposedEdge | null> {
+  const result = await withSession(async (session) => {
+    const res = await session.run(
+      `MATCH (a:Concept)-[r:RELATES_TO]-(b:Concept)
+       WHERE elementId(r) = $edgeId
+       RETURN elementId(r) AS edgeId,
+              a.id AS fromId, a.label AS fromLabel,
+              b.id AS toId,   b.label AS toLabel,
+              r.type AS type, r.rationale AS rationale,
+              r.citedInsights AS citedInsights,
+              r.confidence AS confidence,
+              r.createdBy AS createdBy,
+              r.status AS status
+       LIMIT 1`,
+      { edgeId }
+    );
+    if (res.records.length === 0) return null;
+    const record = res.records[0];
+    return {
+      edgeId: record.get("edgeId") as string,
+      fromId: record.get("fromId") as string,
+      fromLabel: record.get("fromLabel") as string,
+      toId: record.get("toId") as string,
+      toLabel: record.get("toLabel") as string,
+      type: record.get("type") as RelationType,
+      rationale: record.get("rationale") as string,
+      citedInsights: (record.get("citedInsights") as string[]) ?? [],
+      confidence: toNumber(record.get("confidence")),
+      createdBy: record.get("createdBy") as RelationCreatedBy,
+      status: record.get("status") as RelationStatus
+    };
+  });
+  return result ?? null;
+}
+
 export async function updateEdgeStatus(params: {
   edgeId: string;
   status: RelationStatus;

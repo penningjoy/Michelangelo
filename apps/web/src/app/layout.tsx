@@ -1,6 +1,12 @@
 import type { Metadata } from "next";
-import { Inter, Source_Serif_4 } from "next/font/google";
+import { Fraunces, Manrope, Source_Serif_4 } from "next/font/google";
 import "./styles.css";
+
+const display = Fraunces({
+  subsets: ["latin"],
+  variable: "--font-display",
+  weight: ["600", "700"]
+});
 
 const serif = Source_Serif_4({
   subsets: ["latin"],
@@ -8,22 +14,22 @@ const serif = Source_Serif_4({
   weight: ["400", "500", "600"]
 });
 
-const sans = Inter({
+const sans = Manrope({
   subsets: ["latin"],
   variable: "--font-ui",
   weight: ["400", "500", "600"]
 });
 
 export const metadata: Metadata = {
-  title: "Michelangelo · Research workspace",
+  title: "Michelangelo · Concept studio",
   description:
-    "Cross-domain research with grounded answers, inspectable sources, and a growing concept memory."
+    "Conversation-first concept building with durable artifacts, grounded evidence, and cross-domain transfer."
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${serif.variable} ${sans.variable}`}>
-      <body>
+    <html lang="en" className={`${display.variable} ${serif.variable} ${sans.variable}`}>
+      <body className="atelier-body">
         {children}
         <a
           className="brand-mark"
