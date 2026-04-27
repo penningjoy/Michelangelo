@@ -352,9 +352,10 @@ export function mergeResearchResult(
   const prior = input.priorArtifacts;
   if (!prior) {
     if (!input.forceFounderMode && generated.artifacts.founderMode && !isFounderModePrompt(input.prompt)) {
+      const { founderMode: _founderMode, ...artifacts } = generated.artifacts;
       return {
         ...generated,
-        artifacts: { ...generated.artifacts, founderMode: undefined }
+        artifacts
       };
     }
     return generated;

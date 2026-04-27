@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { ResearchArtifacts } from "./types";
 import {
   checkDatabase,
   createSession,
@@ -9,7 +10,9 @@ import {
   listSessionConceptIds,
   listSessions,
   listTurnSummaries,
+  persistTurn,
   renameSession,
+  replaceArtifacts,
   resetStorageForTests
 } from "./storage";
 
@@ -63,5 +66,51 @@ describe("storage ownership", () => {
       reason:
         "Postgres is not configured. Using in-memory storage until DATABASE_URL or POSTGRES_URL is set."
     });
+  });
+
+  it("skips optional undefined artifacts when persisting", async () => {
+    const session = await createSession("Artifacts", "principal-alpha");
+    const artifacts: ResearchArtifacts = {
+      summary: {
+        title: "Title",
+        framing: "Framing"
+      },
+      core: {
+        essence: "Essence",
+        explanation: "Explanation"
+      },
+      analogies: [],
+      parallels: [],
+      applications: [],
+      unexplored: [],
+      claims: [],
+      concepts: ["concept-a"],
+      sources: [
+        {
+          id: "src-1",
+          title: "Source",
+          url: "https://example.com",
+          excerpt: "Excerpt",
+          reason: "Reason"
+        }
+      ],
+      founderMode: undefined
+    };
+
+    const replaced = await replaceArtifacts(session.id, artifacts);
+    expect(replaced.map((row) => row.type)).not.toContain("founderMode");
+
+    await persistTurn(session.id, {
+      turnIndex: 0,
+      artifacts,
+      compact: {
+        gist: "gist",
+        keyClaims: []
+      },
+      conceptsByInsight: {}
+    });
+
+    const stored = await listArtifacts(session.id, "principal-alpha");
+    expect(stored.map((row) => row.type)).not.toContain("founderMode");
   });
 });

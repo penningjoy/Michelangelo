@@ -248,14 +248,7 @@ export async function replaceArtifacts(
   sessionId: string,
   artifacts: ResearchArtifacts
 ): Promise<StoredArtifact[]> {
-  const rows = Object.entries(artifacts).map(([type, content]) => ({
-    id: crypto.randomUUID(),
-    sessionId,
-    type: type as keyof ResearchArtifacts,
-    content,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  }));
+  const rows = buildArtifactRows(sessionId, artifacts);
 
   if (!(await canUseDatabase())) {
     memory.artifacts.set(sessionId, rows);
@@ -300,14 +293,7 @@ export async function persistTurn(
 ): Promise<void> {
   const { turnIndex, artifacts, compact, conceptsByInsight } = params;
 
-  const artifactRows = Object.entries(artifacts).map(([type, content]) => ({
-    id: crypto.randomUUID(),
-    sessionId,
-    type: type as keyof ResearchArtifacts,
-    content,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  }));
+  const artifactRows = buildArtifactRows(sessionId, artifacts);
 
   const summary: TurnSummary = {
     id: crypto.randomUUID(),
@@ -850,6 +836,20 @@ function mapArtifact(row: DbArtifact): StoredArtifact {
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString()
   };
+}
+
+function buildArtifactRows(sessionId: string, artifacts: ResearchArtifacts): StoredArtifact[] {
+  const timestamp = new Date().toISOString();
+  return Object.entries(artifacts)
+    .filter(([, content]) => content !== undefined)
+    .map(([type, content]) => ({
+      id: crypto.randomUUID(),
+      sessionId,
+      type: type as keyof ResearchArtifacts,
+      content,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    }));
 }
 
 export function resetStorageForTests(): void {
