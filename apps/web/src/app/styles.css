@@ -1361,11 +1361,6 @@ a:focus-visible {
   border: 1px solid rgba(111, 90, 72, 0.14);
 }
 
-.concept-canvas-stage--expanded {
-  height: 22rem;
-  min-height: 19rem;
-}
-
 .concept-canvas-stage--pulse {
   animation: stage-pulse 1600ms ease-out;
 }
@@ -1454,6 +1449,27 @@ a:focus-visible {
   justify-content: flex-end;
   gap: 0.42rem;
   max-width: min(60%, 16rem);
+}
+
+.concept-canvas-modal-backdrop {
+  z-index: 45;
+}
+
+.concept-canvas-modal {
+  width: min(100%, 90rem);
+  max-height: calc(100dvh - 2rem);
+  overflow: hidden;
+}
+
+.concept-canvas-stage--expanded-modal {
+  height: calc(100dvh - 11rem);
+  min-height: 28rem;
+}
+
+.concept-canvas-empty--modal {
+  min-height: 16rem;
+  display: grid;
+  place-items: center;
 }
 
 .modal-backdrop {
@@ -1634,8 +1650,30 @@ a:focus-visible {
 }
 
 .session-sidebar-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.32rem;
+  line-height: 1;
   font-size: 0.72rem;
   padding: 0.36rem 0.6rem;
+}
+
+.session-sidebar-toggle-icon {
+  font-size: 0.84rem;
+  line-height: 1;
+}
+
+.session-sidebar:not(.session-sidebar--open) .session-sidebar-toggle {
+  width: 1.9rem;
+  height: 1.9rem;
+  padding: 0;
+  border-radius: 999px;
+  gap: 0;
+}
+
+.session-sidebar:not(.session-sidebar--open) .session-sidebar-toggle-icon {
+  font-size: 1rem;
 }
 
 .session-new-btn {

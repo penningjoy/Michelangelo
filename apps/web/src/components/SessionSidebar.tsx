@@ -72,7 +72,10 @@ export function SessionSidebar({
           onClick={onToggle}
           aria-label={isOpen ? "Collapse sessions" : "Expand sessions"}
         >
-          {isOpen ? "Hide" : "Show"}
+          <span className="session-sidebar-toggle-icon" aria-hidden>
+            {isOpen ? "\u2039" : "\u203a"}
+          </span>
+          {isOpen ? <span>Hide</span> : null}
         </button>
       </header>
 

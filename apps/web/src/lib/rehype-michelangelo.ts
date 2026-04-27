@@ -30,7 +30,7 @@ export function rehypeMichelangelo({ spans }: Options) {
     .map((span, originalIndex) => ({ span, originalIndex }))
     .sort((a, b) => a.span.start - b.span.start);
 
-  return () => (tree: Root) => {
+  return (tree: Root) => {
     walk(tree as unknown as { children: ElementContent[] }, []);
   };
 

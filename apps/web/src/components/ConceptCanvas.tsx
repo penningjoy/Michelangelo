@@ -159,6 +159,20 @@ export function ConceptCanvas({
     () => new Map(graphData.nodes.map((node) => [node.id, node])),
     [graphData.nodes]
   );
+  const edgePills = useMemo(() => {
+    const counts = new Map<RelationType, number>();
+    for (const edge of graphData.edges) {
+      counts.set(edge.type, (counts.get(edge.type) ?? 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .sort(([, countA], [, countB]) => countB - countA)
+      .slice(0, 4)
+      .map(([type, count]) => ({
+        type,
+        label: RELATION_LABEL[type],
+        count
+      }));
+  }, [graphData.edges]);
 
   const hoveredNode = hoveredNodeId ? nodeById.get(hoveredNodeId) ?? null : null;
   const sourceLabel = snapshot?.source ? SOURCE_LABEL[snapshot.source] : SOURCE_LABEL.postgres;
@@ -336,8 +350,7 @@ export function ConceptCanvas({
         <div
           className={[
             "concept-canvas-stage",
-            pulse ? "concept-canvas-stage--pulse" : "",
-            isExpanded ? "concept-canvas-stage--expanded" : ""
+            pulse ? "concept-canvas-stage--pulse" : ""
           ]
             .filter(Boolean)
             .join(" ")}
@@ -425,14 +438,109 @@ export function ConceptCanvas({
           ) : null}
 
           <div className="concept-canvas-edge-list">
-            {graphData.edges.slice(0, 4).map((edge) => (
-              <span key={`edge-pill-${edge.edgeId}`} className="concept-canvas-edge-pill">
-                {RELATION_LABEL[edge.type]}
+            {edgePills.map((edge) => (
+              <span key={`edge-pill-${edge.type}`} className="concept-canvas-edge-pill">
+                {edge.label}
+                {edge.count > 1 ? ` ×${edge.count}` : ""}
               </span>
             ))}
           </div>
         </div>
       )}
+
+      {isExpanded ? (
+        <div
+          className="modal-backdrop concept-canvas-modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setIsExpanded(false);
+          }}
+        >
+          <section
+            className="modal concept-canvas-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="concept-canvas-modal-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="modal-header">
+              <div>
+                <p className="eyebrow">Content map</p>
+                <h2 id="concept-canvas-modal-title">Structure at a glance</h2>
+              </div>
+              <button
+                className="toolbar-btn toolbar-btn--ghost"
+                onClick={() => setIsExpanded(false)}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+
+            {graphData.nodes.length === 0 ? (
+              <div className="concept-canvas-empty concept-canvas-empty--modal">
+                <p>Run a few turns and the map will begin to connect repeated ideas.</p>
+              </div>
+            ) : (
+              <div className="concept-canvas-stage concept-canvas-stage--expanded-modal">
+                <svg
+                  viewBox={`0 0 ${size.width} ${size.height}`}
+                  className="concept-canvas-svg"
+                  role="img"
+                  aria-label="Expanded 2D concept map"
+                >
+                  {graphData.edges.map((edge) => {
+                    const from = nodeById.get(edge.fromId);
+                    const to = nodeById.get(edge.toId);
+                    if (!from || !to) return null;
+                    return (
+                      <line
+                        key={`modal-${edge.edgeId}`}
+                        x1={from.x}
+                        y1={from.y}
+                        x2={to.x}
+                        y2={to.y}
+                        stroke={RELATION_STROKE[edge.type]}
+                        strokeOpacity={edge.source === "accepted-graph" ? 0.9 : 0.62}
+                        strokeWidth={edge.source === "accepted-graph" ? 2.1 : 1.25 + edge.strength * 0.12}
+                        strokeDasharray={RELATION_DASH[edge.type]}
+                      />
+                    );
+                  })}
+
+                  {graphData.nodes.map((node) => (
+                    <g
+                      key={`modal-node-${node.id}`}
+                      className="concept-canvas-node"
+                      transform={`translate(${node.x} ${node.y})`}
+                    >
+                      <circle
+                        r={node.radius + (node.isSeed ? 4 : 0)}
+                        fill={node.isSeed ? "rgba(138, 77, 47, 0.13)" : "transparent"}
+                      />
+                      <circle
+                        r={node.radius}
+                        fill={node.isSeed ? "#8f5533" : "#f7ecde"}
+                        stroke={node.isSeed ? "#6d4026" : "#a89785"}
+                        strokeWidth={node.isSeed ? 2.2 : 1.4}
+                      />
+                      <text
+                        y={node.radius + 16}
+                        textAnchor="middle"
+                        className={
+                          node.isSeed ? "concept-canvas-label concept-canvas-label--seed" : "concept-canvas-label"
+                        }
+                      >
+                        {node.label.replace(/-/g, " ")}
+                      </text>
+                    </g>
+                  ))}
+                </svg>
+              </div>
+            )}
+          </section>
+        </div>
+      ) : null}
     </section>
   );
 }
