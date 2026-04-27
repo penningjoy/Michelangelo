@@ -83,7 +83,8 @@ export function ConceptCanvas({
   onNodeClick?: (conceptId: string) => void;
 }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
-  const [size, setSize] = useState<{ width: number; height: number }>({ width: 360, height: 280 });
+  const [size, setSize] = useState<{ width: number; height: number }>({ width: 360, height: 270 });
+  const [modalSize, setModalSize] = useState<{ width: number; height: number }>({ width: 1180, height: 640 });
   const [isFetching, setIsFetching] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [pulse, setPulse] = useState(false);
@@ -91,6 +92,7 @@ export function ConceptCanvas({
   const [isExpanded, setIsExpanded] = useState(false);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const modalStageRef = useRef<HTMLDivElement | null>(null);
   const prevSigRef = useRef<string>("");
 
   useEffect(() => {
@@ -99,9 +101,23 @@ export function ConceptCanvas({
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const { width } = entry.contentRect;
-        setSize({
-          width: Math.max(260, width),
-          height: isExpanded ? 380 : 270
+        setSize({ width: Math.max(260, width), height: 270 });
+      }
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!isExpanded) return;
+    const element = modalStageRef.current;
+    if (!element) return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        setModalSize({
+          width: Math.max(640, Math.round(width)),
+          height: Math.max(420, Math.round(height))
         });
       }
     });
@@ -147,13 +163,29 @@ export function ConceptCanvas({
   const graphData = useMemo(() => {
     if (!snapshot) return { nodes: [] as PositionedNode[], edges: [] as GraphEdge[] };
     const seedSet = new Set(snapshot.seedIds ?? []);
-    const nodes = layoutNodes(snapshot.nodes, seedSet, size.width, size.height);
+    const nodes = layoutNodes(snapshot.nodes, seedSet, size.width, size.height, false);
     const nodeIds = new Set(nodes.map((node) => node.id));
     const edges = snapshot.edges.filter(
       (edge) => nodeIds.has(edge.fromId) && nodeIds.has(edge.toId)
     );
     return { nodes, edges };
   }, [snapshot, size.height, size.width]);
+
+  const modalGraphData = useMemo(() => {
+    if (!snapshot || !isExpanded) return { nodes: [] as PositionedNode[], edges: [] as GraphEdge[] };
+    const seedSet = new Set(snapshot.seedIds ?? []);
+    const nodes = layoutNodes(snapshot.nodes, seedSet, modalSize.width, modalSize.height, true);
+    const nodeIds = new Set(nodes.map((node) => node.id));
+    const edges = snapshot.edges.filter(
+      (edge) => nodeIds.has(edge.fromId) && nodeIds.has(edge.toId)
+    );
+    return { nodes, edges };
+  }, [snapshot, isExpanded, modalSize.height, modalSize.width]);
+
+  const modalNodeById = useMemo(
+    () => new Map(modalGraphData.nodes.map((node) => [node.id, node])),
+    [modalGraphData.nodes]
+  );
 
   const nodeById = useMemo(
     () => new Map(graphData.nodes.map((node) => [node.id, node])),
@@ -477,21 +509,25 @@ export function ConceptCanvas({
               </button>
             </div>
 
-            {graphData.nodes.length === 0 ? (
+            {modalGraphData.nodes.length === 0 ? (
               <div className="concept-canvas-empty concept-canvas-empty--modal">
                 <p>Run a few turns and the map will begin to connect repeated ideas.</p>
               </div>
             ) : (
-              <div className="concept-canvas-stage concept-canvas-stage--expanded-modal">
+              <div
+                ref={modalStageRef}
+                className="concept-canvas-stage concept-canvas-stage--expanded-modal"
+              >
                 <svg
-                  viewBox={`0 0 ${size.width} ${size.height}`}
+                  viewBox={`0 0 ${modalSize.width} ${modalSize.height}`}
+                  preserveAspectRatio="xMidYMid meet"
                   className="concept-canvas-svg"
                   role="img"
                   aria-label="Expanded 2D concept map"
                 >
-                  {graphData.edges.map((edge) => {
-                    const from = nodeById.get(edge.fromId);
-                    const to = nodeById.get(edge.toId);
+                  {modalGraphData.edges.map((edge) => {
+                    const from = modalNodeById.get(edge.fromId);
+                    const to = modalNodeById.get(edge.toId);
                     if (!from || !to) return null;
                     return (
                       <line
@@ -501,41 +537,66 @@ export function ConceptCanvas({
                         x2={to.x}
                         y2={to.y}
                         stroke={RELATION_STROKE[edge.type]}
-                        strokeOpacity={edge.source === "accepted-graph" ? 0.9 : 0.62}
-                        strokeWidth={edge.source === "accepted-graph" ? 2.1 : 1.25 + edge.strength * 0.12}
+                        strokeOpacity={edge.source === "accepted-graph" ? 0.9 : 0.6}
+                        strokeWidth={edge.source === "accepted-graph" ? 2.4 : 1.4 + edge.strength * 0.16}
                         strokeDasharray={RELATION_DASH[edge.type]}
                       />
                     );
                   })}
 
-                  {graphData.nodes.map((node) => (
-                    <g
-                      key={`modal-node-${node.id}`}
-                      className="concept-canvas-node"
-                      transform={`translate(${node.x} ${node.y})`}
-                    >
-                      <circle
-                        r={node.radius + (node.isSeed ? 4 : 0)}
-                        fill={node.isSeed ? "rgba(138, 77, 47, 0.13)" : "transparent"}
-                      />
-                      <circle
-                        r={node.radius}
-                        fill={node.isSeed ? "#8f5533" : "#f7ecde"}
-                        stroke={node.isSeed ? "#6d4026" : "#a89785"}
-                        strokeWidth={node.isSeed ? 2.2 : 1.4}
-                      />
-                      <text
-                        y={node.radius + 16}
-                        textAnchor="middle"
-                        className={
-                          node.isSeed ? "concept-canvas-label concept-canvas-label--seed" : "concept-canvas-label"
-                        }
+                  {modalGraphData.nodes.map((node) => {
+                    const labelAbove = node.y < modalSize.height / 2;
+                    const labelOffset = node.radius + 18;
+                    return (
+                      <g
+                        key={`modal-node-${node.id}`}
+                        className="concept-canvas-node"
+                        transform={`translate(${node.x} ${node.y})`}
                       >
-                        {node.label.replace(/-/g, " ")}
-                      </text>
-                    </g>
-                  ))}
+                        <circle
+                          r={node.radius + (node.isSeed ? 5 : 0)}
+                          fill={node.isSeed ? "rgba(138, 77, 47, 0.13)" : "transparent"}
+                        />
+                        <circle
+                          r={node.radius}
+                          fill={node.isSeed ? "#8f5533" : "#f7ecde"}
+                          stroke={node.isSeed ? "#6d4026" : "#a89785"}
+                          strokeWidth={node.isSeed ? 2.4 : 1.5}
+                        />
+                        <text
+                          y={labelAbove ? -labelOffset + 4 : labelOffset}
+                          textAnchor="middle"
+                          dominantBaseline={labelAbove ? "auto" : "hanging"}
+                          className={
+                            node.isSeed
+                              ? "concept-canvas-label concept-canvas-label--modal concept-canvas-label--seed"
+                              : "concept-canvas-label concept-canvas-label--modal"
+                          }
+                        >
+                          {node.label.replace(/-/g, " ")}
+                        </text>
+                      </g>
+                    );
+                  })}
                 </svg>
+
+                <div className="concept-canvas-legend" aria-hidden>
+                  <span className="concept-canvas-legend-chip concept-canvas-legend-chip--seed">
+                    Current thread
+                  </span>
+                  <span className="concept-canvas-legend-chip">Session memory</span>
+                </div>
+
+                {edgePills.length > 0 ? (
+                  <div className="concept-canvas-edge-list">
+                    {edgePills.map((edge) => (
+                      <span key={`modal-edge-pill-${edge.type}`} className="concept-canvas-edge-pill">
+                        {edge.label}
+                        {edge.count > 1 ? ` ×${edge.count}` : ""}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             )}
           </section>
@@ -549,7 +610,8 @@ function layoutNodes(
   nodes: GraphNode[],
   seedSet: Set<string>,
   width: number,
-  height: number
+  height: number,
+  roomy: boolean
 ): PositionedNode[] {
   const seeds = nodes
     .filter((node) => seedSet.has(node.id))
@@ -560,28 +622,35 @@ function layoutNodes(
 
   const placed: PositionedNode[] = [];
   const centerX = width / 2;
-  const centerY = height / 2 - 6;
+  const centerY = height / 2;
+  const padX = roomy ? Math.max(80, width * 0.07) : 28;
+  const padY = roomy ? Math.max(70, height * 0.12) : 32;
+  const maxRadiusX = Math.max(40, width / 2 - padX);
+  const maxRadiusY = Math.max(40, height / 2 - padY);
 
   if (seeds.length === 1) {
-    placed.push(positionNode(seeds[0], centerX, centerY - 10, true));
+    placed.push(positionNode(seeds[0], centerX, centerY, true, roomy));
   } else if (seeds.length > 1) {
-    placed.push(
-      ...placeRing(
-        seeds,
-        centerX,
-        centerY - 8,
-        Math.min(width * 0.18, 88),
-        Math.min(height * 0.15, 58),
-        true
-      )
-    );
+    const seedRx = roomy ? Math.min(maxRadiusX * 0.22, 160) : Math.min(width * 0.18, 88);
+    const seedRy = roomy ? Math.min(maxRadiusY * 0.22, 110) : Math.min(height * 0.15, 58);
+    placed.push(...placeRing(seeds, centerX, centerY, seedRx, seedRy, true, roomy));
   }
 
-  const chunks = chunkArray(others, isDense(others.length) ? 10 : 8);
+  const chunkSize = roomy ? 14 : isDense(others.length) ? 10 : 8;
+  const chunks = chunkArray(others, chunkSize);
+  const ringCount = Math.max(1, chunks.length);
   chunks.forEach((chunk, index) => {
-    const xRadius = Math.min(width * (0.28 + index * 0.08), 110 + index * 46);
-    const yRadius = Math.min(height * (0.22 + index * 0.08), 80 + index * 34);
-    placed.push(...placeRing(chunk, centerX, centerY + 8, xRadius, yRadius, false));
+    if (roomy) {
+      const ratio = ringCount === 1 ? 0.85 : 0.5 + (index / (ringCount - 1)) * 0.5;
+      const xRadius = maxRadiusX * ratio;
+      const yRadius = maxRadiusY * ratio;
+      const offset = index % 2 === 0 ? 0 : Math.PI / chunk.length;
+      placed.push(...placeRing(chunk, centerX, centerY, xRadius, yRadius, false, roomy, offset));
+    } else {
+      const xRadius = Math.min(width * (0.28 + index * 0.08), 110 + index * 46);
+      const yRadius = Math.min(height * (0.22 + index * 0.08), 80 + index * 34);
+      placed.push(...placeRing(chunk, centerX, centerY + 8, xRadius, yRadius, false, roomy));
+    }
   });
 
   return placed;
@@ -593,26 +662,39 @@ function placeRing(
   centerY: number,
   radiusX: number,
   radiusY: number,
-  isSeed: boolean
+  isSeed: boolean,
+  roomy: boolean,
+  angleOffset = 0
 ): PositionedNode[] {
   if (nodes.length === 0) return [];
   if (nodes.length === 1) {
-    return [positionNode(nodes[0], centerX, centerY, isSeed)];
+    return [positionNode(nodes[0], centerX, centerY, isSeed, roomy)];
   }
 
   return nodes.map((node, index) => {
-    const angle = -Math.PI / 2 + (index / nodes.length) * Math.PI * 2;
+    const angle = -Math.PI / 2 + angleOffset + (index / nodes.length) * Math.PI * 2;
     return positionNode(
       node,
       centerX + Math.cos(angle) * radiusX,
       centerY + Math.sin(angle) * radiusY,
-      isSeed
+      isSeed,
+      roomy
     );
   });
 }
 
-function positionNode(node: GraphNode, x: number, y: number, isSeed: boolean): PositionedNode {
-  const radius = Math.max(isSeed ? 12 : 10, Math.min(22, 8 + Math.sqrt(Math.max(1, node.mentionCount)) * 2.1));
+function positionNode(
+  node: GraphNode,
+  x: number,
+  y: number,
+  isSeed: boolean,
+  roomy: boolean
+): PositionedNode {
+  const base = roomy ? 12 : 8;
+  const scale = roomy ? 2.8 : 2.1;
+  const cap = roomy ? 30 : 22;
+  const min = roomy ? (isSeed ? 16 : 13) : isSeed ? 12 : 10;
+  const radius = Math.max(min, Math.min(cap, base + Math.sqrt(Math.max(1, node.mentionCount)) * scale));
   return { ...node, x, y, radius, isSeed };
 }
 

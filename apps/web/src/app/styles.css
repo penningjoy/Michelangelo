@@ -1456,14 +1456,30 @@ a:focus-visible {
 }
 
 .concept-canvas-modal {
-  width: min(100%, 90rem);
+  width: min(100%, 96rem);
+  max-width: calc(100vw - 2rem);
   max-height: calc(100dvh - 2rem);
   overflow: hidden;
 }
 
 .concept-canvas-stage--expanded-modal {
+  width: 100%;
   height: calc(100dvh - 11rem);
-  min-height: 28rem;
+  min-height: 32rem;
+}
+
+.concept-canvas-label--modal {
+  font-size: 14px;
+  letter-spacing: 0.005em;
+  paint-order: stroke;
+  stroke: rgba(252, 247, 240, 0.92);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+.concept-canvas-stage--expanded-modal .concept-canvas-legend,
+.concept-canvas-stage--expanded-modal .concept-canvas-edge-list {
+  z-index: 1;
 }
 
 .concept-canvas-empty--modal {
