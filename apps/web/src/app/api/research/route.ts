@@ -6,6 +6,7 @@ import { getServerOpenAiKey } from "../../../lib/serverOpenAiKey";
 import {
   addMessage,
   createSession,
+  getLastResponseId,
   getPoolIfAvailable,
   getSession,
   hasVectorSupport,
@@ -13,6 +14,7 @@ import {
   listMessages,
   listTurnSummaries,
   persistTurn,
+  setLastResponseId,
   updateMessageConceptSpans
 } from "../../../lib/storage";
 import {
@@ -23,6 +25,12 @@ import {
 } from "../../../lib/retrieval";
 import { runCurator, type TurnConcept } from "../../../lib/curator";
 import { upsertConcepts } from "../../../lib/graph";
+import { getCache } from "../../../lib/cache";
+import {
+  conceptsListCacheKey,
+  graphDataCacheKey,
+  sessionsListCacheKey
+} from "../../../lib/cacheKeys";
 import type { ResearchArtifacts, ResearchEvent } from "../../../lib/types";
 
 export const runtime = "nodejs";
@@ -71,9 +79,18 @@ export async function POST(request: Request) {
 
         // Capture strictly prior turns BEFORE persisting the current user prompt,
         // so the provider isn't given the current question twice.
-        const priorMessages = await listMessages(session.id, principal);
-        const priorArtifacts = artifactsFromRows(await listArtifacts(session.id, principal));
-        const priorTurnSummaries = await listTurnSummaries(session.id, principal);
+        const previousResponseId = await getLastResponseId(session.id, principal);
+        // When threading via previous_response_id, the model already has the
+        // transcript and full artifacts in its server-side state, so we skip
+        // the read from Postgres entirely. Summaries stay cheap and useful
+        // either way (used for the cold-path prompt prefix).
+        const [priorMessages, priorArtifacts, priorTurnSummaries] = await Promise.all([
+          previousResponseId ? Promise.resolve([]) : listMessages(session.id, principal),
+          previousResponseId
+            ? Promise.resolve(null)
+            : listArtifacts(session.id, principal).then(artifactsFromRows),
+          listTurnSummaries(session.id, principal)
+        ]);
         const turnIndex = priorTurnSummaries.length + 1;
 
         send({ type: "status", message: "Saving prompt..." });
@@ -93,6 +110,7 @@ export async function POST(request: Request) {
         send({ type: "status", message: "Researching and structuring artifacts..." });
 
         let finalResult: ResearchResult | null = null;
+        let nextResponseId: string | null = null;
 
         for await (const event of streamResearchResult({
           apiKey: effectiveKey,
@@ -102,12 +120,14 @@ export async function POST(request: Request) {
           priorTurnSummaries,
           crossDomainBlock,
           depth,
-          forceFounderMode
+          forceFounderMode,
+          previousResponseId
         })) {
           if (event.type === "answer-delta") {
             send({ type: "delta", text: event.text });
           } else if (event.type === "complete") {
             finalResult = event.result;
+            nextResponseId = event.responseId;
           }
         }
 
@@ -133,6 +153,21 @@ export async function POST(request: Request) {
           compact,
           conceptsByInsight
         });
+        // Persist the new response.id only after the turn is fully stored so we
+        // never thread an id whose context isn't reflected in our own data.
+        if (nextResponseId) {
+          await setLastResponseId(session.id, nextResponseId).catch(() => undefined);
+        }
+        // Invalidate read caches that this turn just made stale. Sidebar
+        // ordering changes (touched session goes to top), the concept list
+        // gets new mentions, and the graph picks up new nodes.
+        const cache = getCache();
+        void Promise.all([
+          cache.del(sessionsListCacheKey(principal)),
+          cache.del(conceptsListCacheKey(principal)),
+          cache.del(graphDataCacheKey(principal, null)),
+          cache.del(graphDataCacheKey(principal, session.id))
+        ]).catch(() => undefined);
         send({ type: "artifacts", artifacts: finalResult.artifacts });
 
         // Concept spans for inline memory underlines: match labels of concepts

@@ -1,4 +1,5 @@
 import neo4j, { type Driver, type Session, type Integer } from "neo4j-driver";
+import { getServerEnv } from "./serverEnv";
 
 /**
  * Neo4j driver module. Lazy-init; no-ops when NEO4J_URI is unset so local dev
@@ -10,15 +11,17 @@ let driver: Driver | null = null;
 let constraintsEnsured = false;
 
 export function isGraphEnabled(): boolean {
-  return Boolean(process.env.NEO4J_URI && process.env.NEO4J_USER && process.env.NEO4J_PASSWORD);
+  return Boolean(
+    getServerEnv("NEO4J_URI") && getServerEnv("NEO4J_USER") && getServerEnv("NEO4J_PASSWORD")
+  );
 }
 
 export function getDriver(): Driver | null {
   if (!isGraphEnabled()) return null;
   if (driver) return driver;
   driver = neo4j.driver(
-    process.env.NEO4J_URI!,
-    neo4j.auth.basic(process.env.NEO4J_USER!, process.env.NEO4J_PASSWORD!),
+    getServerEnv("NEO4J_URI")!,
+    neo4j.auth.basic(getServerEnv("NEO4J_USER")!, getServerEnv("NEO4J_PASSWORD")!),
     { disableLosslessIntegers: true }
   );
   return driver;

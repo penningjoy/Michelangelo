@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import { Pool } from "pg";
+import { getCache, hashKey } from "./cache";
 
 /**
  * A single cross-domain retrieval hit: a concept the user has seen before in
@@ -13,6 +14,9 @@ export type CrossDomainHit = {
   priorInsightId: string;
   priorClaim: string;
 };
+
+const EMBEDDING_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
+const RETRIEVAL_TTL_SECONDS = 60 * 60; // 1 hour
 
 export type ConceptSpan = {
   start: number;
@@ -44,6 +48,13 @@ export async function retrieveCrossDomainContext(
   try {
     const { apiKey, owner, userPrompt, currentSessionId, pool, hasVector } = input;
     if (!pool) return [];
+
+    // Same prompt → same hits within an hour. Skips the embedding call AND
+    // the per-concept SQL hydration loop entirely on cache hit.
+    const cache = getCache();
+    const cacheKey = `xdom:${owner}:${currentSessionId}:${await hashKey(userPrompt)}`;
+    const hit = await cache.get<CrossDomainHit[]>(cacheKey);
+    if (hit) return hit;
 
     let conceptIds: string[] = [];
 
@@ -121,7 +132,9 @@ export async function retrieveCrossDomainContext(
       }
       if (hits.length >= TOP_K) break;
     }
-    return hits.slice(0, TOP_K);
+    const result = hits.slice(0, TOP_K);
+    void cache.set(cacheKey, result, RETRIEVAL_TTL_SECONDS).catch(() => undefined);
+    return result;
   } catch {
     return [];
   }
@@ -185,18 +198,84 @@ export function formatCrossDomainPromptBlock(hits: CrossDomainHit[]): string {
   ].join("\n");
 }
 
-async function embedText(apiKey: string, text: string): Promise<number[] | null> {
+/**
+ * Embed a single string, with a 30-day cache keyed by the input hash. Same
+ * prompt or concept label across sessions/turns hits the cache instead of
+ * burning an embedding call. Exported so the curator can share the cache.
+ */
+export async function embedText(apiKey: string, text: string): Promise<number[] | null> {
+  const trimmed = text.slice(0, 8000);
+  const cache = getCache();
+  const key = `emb:${await hashKey(trimmed)}`;
+  const hit = await cache.get<number[]>(key);
+  if (hit) return hit;
+
   const client = new OpenAI({ apiKey });
   const response = await client.embeddings.create({
     model: "text-embedding-3-small",
-    input: text.slice(0, 8000)
+    input: trimmed
   });
-  return response.data[0]?.embedding ?? null;
+  const embedding = response.data[0]?.embedding ?? null;
+  if (embedding) {
+    void cache.set(key, embedding, EMBEDDING_TTL_SECONDS).catch(() => undefined);
+  }
+  return embedding;
+}
+
+/**
+ * Embed many strings in a single OpenAI call. The Embeddings API accepts an
+ * array as input and returns one embedding per row, in order. We split the
+ * inputs into cache hits vs. misses, send only the misses, then stitch the
+ * results back together. Used by the curator and the concept backfill so a
+ * 10-concept turn becomes one request instead of ten.
+ */
+export async function embedTexts(
+  apiKey: string,
+  texts: string[]
+): Promise<Array<number[] | null>> {
+  if (texts.length === 0) return [];
+  const cache = getCache();
+  const trimmed = texts.map((text) => text.slice(0, 8000));
+  const keys = await Promise.all(trimmed.map((text) => hashKey(text).then((h) => `emb:${h}`)));
+
+  const results: Array<number[] | null> = new Array(texts.length).fill(null);
+  const missingIndices: number[] = [];
+  const missingInputs: string[] = [];
+
+  for (let i = 0; i < trimmed.length; i++) {
+    const cached = await cache.get<number[]>(keys[i]);
+    if (cached) {
+      results[i] = cached;
+    } else {
+      missingIndices.push(i);
+      missingInputs.push(trimmed[i]);
+    }
+  }
+
+  if (missingInputs.length === 0) return results;
+
+  const client = new OpenAI({ apiKey });
+  const response = await client.embeddings.create({
+    model: "text-embedding-3-small",
+    input: missingInputs
+  });
+
+  for (let i = 0; i < missingIndices.length; i++) {
+    const embedding = response.data[i]?.embedding ?? null;
+    const targetIdx = missingIndices[i];
+    results[targetIdx] = embedding;
+    if (embedding) {
+      void cache.set(keys[targetIdx], embedding, EMBEDDING_TTL_SECONDS).catch(() => undefined);
+    }
+  }
+
+  return results;
 }
 
 /**
  * Best-effort backfill: embed any concepts that don't yet have an embedding.
  * Runs after the turn is persisted, never blocks the response, never throws.
+ * Batches the OpenAI call so 10 concepts cost one request, not ten.
  */
 export async function backfillConceptEmbeddings(
   pool: Pool,
@@ -209,13 +288,19 @@ export async function backfillConceptEmbeddings(
       `select id from concepts where id = any($1::text[]) and embedding is null`,
       [labels]
     );
-    for (const row of rows.rows) {
-      const embedding = await embedText(apiKey, row.id.replace(/-/g, " ")).catch(() => null);
+    if (rows.rows.length === 0) return;
+
+    const ids = rows.rows.map((row) => row.id);
+    const inputs = ids.map((id) => id.replace(/-/g, " "));
+    const embeddings = await embedTexts(apiKey, inputs).catch(() => []);
+
+    for (let i = 0; i < ids.length; i++) {
+      const embedding = embeddings[i];
       if (!embedding) continue;
       const literal = `[${embedding.join(",")}]`;
       await pool.query(`update concepts set embedding = $1::vector where id = $2`, [
         literal,
-        row.id
+        ids[i]
       ]);
     }
   } catch {

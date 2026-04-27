@@ -1,6 +1,9 @@
 import OpenAI from "openai";
 import type { Pool } from "pg";
 import { z } from "zod";
+import { getCache } from "./cache";
+import { embedText } from "./retrieval";
+import { getServerEnv } from "./serverEnv";
 import {
   findEdge,
   isGraphEnabled,
@@ -8,6 +11,8 @@ import {
   upsertRelation,
   type RelationType
 } from "./graph";
+
+const NEIGHBOR_TTL_SECONDS = 60 * 10; // 10 min
 
 /**
  * The curator agent. Runs after each persisted turn. For every concept the
@@ -19,7 +24,7 @@ import {
  * Fire-and-forget: never throws, never blocks the research response.
  */
 
-const CURATOR_MODEL = process.env.OPENAI_MODEL_CURATOR || "gpt-5.2-mini";
+const CURATOR_MODEL = getServerEnv("OPENAI_MODEL_CURATOR") || "gpt-5.2-mini";
 const TOP_K_NEIGHBORS = 3;
 const MAX_PAIRS_PER_TURN = 12;
 
@@ -149,31 +154,42 @@ async function vectorNeighbors(
   owner: string,
   currentSessionId: string
 ): Promise<NeighborClaim[]> {
-  const client = new OpenAI({ apiKey });
-  const needle = concept.label.replace(/-/g, " ");
-  const embedding = await client.embeddings
-    .create({ model: "text-embedding-3-small", input: needle })
-    .then((r) => r.data[0]?.embedding ?? null)
-    .catch(() => null);
-  if (!embedding) return labelNeighbors(pool, concept, owner, currentSessionId);
+  // Cache the neighbor IDs (not the hydrated claims) for 10 minutes. Within a
+  // single turn the curator may revisit the same concept's neighbors when
+  // multiple turn-concepts overlap. Across turns, neighbor sets shift slowly.
+  const cache = getCache();
+  const cacheKey = `nbr:${owner}:${concept.id}`;
 
-  const vectorLiteral = `[${embedding.join(",")}]`;
-  const rows = await pool.query<{ id: string; label: string }>(
-    `select c.id, c.label
-       from concepts c
-      where c.embedding is not null
-        and c.id <> $1
-        and exists (
-          select 1
-            from concept_mentions cm
-            join sessions s on s.id = cm.session_id
-           where cm.concept_id = c.id and s.owner = $2
-        )
-       order by c.embedding <=> $3::vector
-       limit $4`,
-    [concept.id, owner, vectorLiteral, TOP_K_NEIGHBORS]
-  );
-  return hydrateNeighbors(pool, rows.rows, owner, currentSessionId);
+  let neighborRows = await cache.get<Array<{ id: string; label: string }>>(cacheKey);
+
+  if (!neighborRows) {
+    // Reuses the embedText cache from retrieval.ts so the same concept label
+    // doesn't get re-embedded across turns.
+    const needle = concept.label.replace(/-/g, " ");
+    const embedding = await embedText(apiKey, needle).catch(() => null);
+    if (!embedding) return labelNeighbors(pool, concept, owner, currentSessionId);
+
+    const vectorLiteral = `[${embedding.join(",")}]`;
+    const rows = await pool.query<{ id: string; label: string }>(
+      `select c.id, c.label
+         from concepts c
+        where c.embedding is not null
+          and c.id <> $1
+          and exists (
+            select 1
+              from concept_mentions cm
+              join sessions s on s.id = cm.session_id
+             where cm.concept_id = c.id and s.owner = $2
+          )
+         order by c.embedding <=> $3::vector
+         limit $4`,
+      [concept.id, owner, vectorLiteral, TOP_K_NEIGHBORS]
+    );
+    neighborRows = rows.rows;
+    void cache.set(cacheKey, neighborRows, NEIGHBOR_TTL_SECONDS).catch(() => undefined);
+  }
+
+  return hydrateNeighbors(pool, neighborRows, owner, currentSessionId);
 }
 
 async function labelNeighbors(
@@ -290,10 +306,46 @@ async function proposeRelation(
     `  representative claim: "${pair.b.claim}"`
   ].join("\n");
 
+  // Structured output guarantees the model returns valid JSON matching our
+  // schema, so we never fall through to the regex extraction path. The
+  // instructions prefix is unchanged across calls within a turn, so OpenAI's
+  // automatic prefix cache also kicks in here for the 12 sequential calls.
   const response = await client.responses.create({
     model: CURATOR_MODEL,
     instructions: CURATOR_INSTRUCTIONS,
-    input: payload
+    input: payload,
+    text: {
+      format: {
+        type: "json_schema",
+        name: "relation_proposal",
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["proposal"],
+          properties: {
+            proposal: {
+              anyOf: [
+                { type: "null" },
+                {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["type", "rationale", "confidence"],
+                  properties: {
+                    type: {
+                      type: "string",
+                      enum: [...RELATION_TYPES]
+                    },
+                    rationale: { type: "string", maxLength: 500 },
+                    confidence: { type: "number", minimum: 0, maximum: 1 }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        strict: true
+      }
+    }
   });
 
   const text = extractOutputText(response);
@@ -331,7 +383,7 @@ function parseJsonObject(text: string): unknown {
 }
 
 function isMockMode(apiKey: string): boolean {
-  return process.env.MOCK_MODEL === "true" || apiKey === "sk-mock";
+  return getServerEnv("MOCK_MODEL") === "true" || apiKey === "sk-mock";
 }
 
 /**

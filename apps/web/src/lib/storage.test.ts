@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  checkDatabase,
   createSession,
   listArtifacts,
   listConceptsForOwner,
@@ -53,5 +54,14 @@ describe("storage ownership", () => {
     expect(await listSessionConceptIds(owned.id, "principal-beta")).toEqual([]);
     expect(await listConceptsForOwner("principal-beta")).toEqual([]);
     expect(await listOwnedConceptIds("principal-beta")).toEqual(new Set());
+  });
+
+  it("reports memory mode when Postgres is not configured", async () => {
+    await expect(checkDatabase()).resolves.toEqual({
+      ok: true,
+      mode: "memory",
+      reason:
+        "Postgres is not configured. Using in-memory storage until DATABASE_URL or POSTGRES_URL is set."
+    });
   });
 });

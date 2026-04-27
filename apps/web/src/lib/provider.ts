@@ -17,6 +17,7 @@ import type {
   TurnSummary,
   UnexploredArtifact
 } from "./types";
+import { getServerEnv } from "./serverEnv";
 
 type ResearchInput = {
   apiKey: string;
@@ -27,11 +28,18 @@ type ResearchInput = {
   crossDomainBlock?: string;
   depth?: ResearchDepth;
   forceFounderMode?: boolean;
+  /**
+   * The OpenAI response.id from the previous turn, if any. When set, we use
+   * the Responses API's server-side conversation state instead of re-sending
+   * the transcript and the full artifacts blob. This is the biggest single
+   * token-efficiency win for repeat turns.
+   */
+  previousResponseId?: string | null;
 };
 
 export type StreamEvent =
   | { type: "answer-delta"; text: string }
-  | { type: "complete"; result: ResearchResult };
+  | { type: "complete"; result: ResearchResult; responseId: string | null };
 
 const DEFAULT_MODEL = "gpt-5.2";
 const SEPARATOR = "<<<ARTIFACTS>>>";
@@ -53,6 +61,8 @@ const INSTRUCTIONS = [
   "  - Open with a framing line or hook that captures the idea.",
   "  - Continue with 2 to 4 short paragraphs of teacherly prose.",
   "  - Blend intuition, mechanism, and implications. Use one concrete analogy, scene, or example when it genuinely helps.",
+  "  - You may use an occasional emoji when it adds orientation rather than decoration.",
+  "  - When structure matters, you may include a tiny plain-text stick or ASCII diagram on its own lines.",
   "  - End by pointing toward a frontier, consequence, or unresolved tension when useful.",
   "  - Cite sources inline using bracket marks like [src-1] immediately after supported clauses.",
   "  - Tone is precise, imaginative, and clear. No headings. No bullet lists. Paragraph breaks are good.",
@@ -116,24 +126,35 @@ export async function* streamResearchResult(input: ResearchInput): AsyncGenerato
       yield { type: "answer-delta", text: chunk };
       await delay(12);
     }
-    yield { type: "complete", result };
+    yield { type: "complete", result, responseId: null };
     return;
   }
 
   const client = new OpenAI({ apiKey: input.apiKey });
+  const useThreaded = Boolean(input.previousResponseId);
   const stream = await client.responses.stream({
-    model: process.env.OPENAI_MODEL || DEFAULT_MODEL,
+    model: getServerEnv("OPENAI_MODEL") || DEFAULT_MODEL,
     tools: [{ type: "web_search" }],
     tool_choice: "auto",
     instructions: instructionsForDepth(input.depth),
-    input: buildPrompt(input)
+    input: useThreaded ? buildThreadedPrompt(input) : buildPrompt(input),
+    ...(useThreaded ? { previous_response_id: input.previousResponseId as string } : {})
   });
 
   let buffer = "";
   let emittedLen = 0;
   let inAnswer = true;
+  let responseId: string | null = null;
 
   for await (const event of stream) {
+    // Capture the response id off the lifecycle events so the route can
+    // persist it for the next turn. The id is stable across created/completed.
+    if (
+      (event.type === "response.created" || event.type === "response.completed") &&
+      typeof (event as { response?: { id?: string } }).response?.id === "string"
+    ) {
+      responseId = (event as { response: { id: string } }).response.id;
+    }
     if (event.type !== "response.output_text.delta") continue;
     buffer += event.delta;
 
@@ -204,7 +225,22 @@ export async function* streamResearchResult(input: ResearchInput): AsyncGenerato
     yield { type: "answer-delta", text: result.answer };
   }
 
-  yield { type: "complete", result };
+  // Best-effort: if neither created nor completed lifecycle event surfaced the
+  // id during streaming, ask the SDK for the final response object now.
+  if (!responseId) {
+    try {
+      const finalResponse = await (
+        stream as unknown as { finalResponse?: () => Promise<{ id?: string }> }
+      ).finalResponse?.();
+      if (finalResponse && typeof finalResponse.id === "string") {
+        responseId = finalResponse.id;
+      }
+    } catch {
+      // ignore — id is a nice-to-have, not required for the response itself
+    }
+  }
+
+  yield { type: "complete", result, responseId };
 }
 
 /** Non-streaming wrapper, kept for callers/tests that don't need streaming. */
@@ -215,7 +251,24 @@ export async function generateResearchResult(input: ResearchInput): Promise<Rese
   throw new Error("Stream ended without a complete result.");
 }
 
+/**
+ * Prompt for the COLD path — first turn, or any turn where a previous
+ * response id wasn't available. Order is structured to maximize OpenAI's
+ * automatic prefix cache: a stable header, then append-only summaries
+ * (which only grow at the tail), then volatile content (artifacts snapshot,
+ * transcript, cross-domain hits, current prompt) at the very end. The
+ * volatile tail invalidates only itself; everything before it stays cached.
+ */
 function buildPrompt(input: ResearchInput): string {
+  const summaries = (input.priorTurnSummaries ?? [])
+    .slice()
+    .sort((a, b) => a.turnIndex - b.turnIndex)
+    .map((summary) => {
+      const claims = summary.keyClaims.map((claim) => `    • ${claim}`).join("\n");
+      return `[turn ${summary.turnIndex}] ${summary.gist}${claims ? `\n${claims}` : ""}`;
+    })
+    .join("\n\n");
+
   const priorTurns = input.priorMessages.slice(-8);
   const transcript = priorTurns.length
     ? priorTurns
@@ -227,32 +280,69 @@ function buildPrompt(input: ResearchInput): string {
         .join("\n\n")
     : "None — this is the first turn.";
 
-  const summaries = (input.priorTurnSummaries ?? [])
-    .slice()
-    .sort((a, b) => a.turnIndex - b.turnIndex)
-    .map((summary) => {
-      const claims = summary.keyClaims.map((claim) => `    • ${claim}`).join("\n");
-      return `[turn ${summary.turnIndex}] ${summary.gist}${claims ? `\n${claims}` : ""}`;
-    })
-    .join("\n\n");
-
-  const artifacts = input.priorArtifacts ? JSON.stringify(input.priorArtifacts).slice(0, 12_000) : "";
-
+  const artifactsSnapshot = compactArtifactsSnapshot(input.priorArtifacts);
   const crossDomain = input.crossDomainBlock ? `\n${input.crossDomainBlock}\n` : "";
 
-  return `
-Compact summaries of older turns (use for context, not to replace):
-${summaries || "None."}
+  return [
+    // ---- Stable header (identical across turns of the same session) ----
+    "Conversation context for this research session.",
+    "",
+    // ---- Append-only summaries (cache stays warm across turns) ----
+    "Compact summaries of older turns (use for context, not to replace):",
+    summaries || "None.",
+    "",
+    // ---- Volatile tail — invalidates the cache from this point on ----
+    "Current right-rail workspace (extend, don't replace, when the follow-up applies):",
+    artifactsSnapshot || "None.",
+    "",
+    "Session transcript (prior turns only):",
+    transcript,
+    crossDomain,
+    "[User, now] — respond to this:",
+    input.prompt
+  ].join("\n");
+}
 
-Full artifacts from the current right-rail workspace (extend these rather than replacing them when the follow-up applies):
-${artifacts || "None"}
+/**
+ * Prompt for the THREADED path — used when previous_response_id is set, so
+ * the model already has the full transcript and prior artifacts in its
+ * server-side state. We only need to send what's new: cross-domain hits and
+ * the current user turn. This is a ~10× reduction in input tokens for
+ * mid-session turns with large workspaces.
+ */
+function buildThreadedPrompt(input: ResearchInput): string {
+  const crossDomain = input.crossDomainBlock ? `\n${input.crossDomainBlock}\n` : "";
+  return [
+    "Continuing the prior research session. Extend the existing workspace; don't restart.",
+    crossDomain,
+    "[User, now] — respond to this:",
+    input.prompt
+  ].join("\n");
+}
 
-Session transcript (prior turns only):
-${transcript}
-${crossDomain}
-[User, now] — respond to this:
-${input.prompt}
-`;
+/**
+ * A trimmed JSON view of the workspace artifacts for the cold-path prompt.
+ * Skips the full sources/applications/parallels arrays (which the model has
+ * already produced) and keeps only what it needs to extend coherently:
+ * the framing, the core, the concept slugs, and the existing source ids
+ * so citations like [src-9] can be reused.
+ */
+function compactArtifactsSnapshot(artifacts: ResearchArtifacts | null | undefined): string {
+  if (!artifacts) return "";
+  const view = {
+    summary: artifacts.summary,
+    core: artifacts.core,
+    concepts: artifacts.concepts,
+    knownSourceIds: artifacts.sources.map((source) => source.id),
+    counts: {
+      analogies: artifacts.analogies.length,
+      parallels: artifacts.parallels.length,
+      applications: artifacts.applications.length,
+      unexplored: artifacts.unexplored.length,
+      claims: artifacts.claims.length
+    }
+  };
+  return JSON.stringify(view).slice(0, 4_000);
 }
 
 export function mergeResearchResult(
@@ -302,13 +392,13 @@ export function mergeResearchResult(
 }
 
 function isMockMode(apiKey: string): boolean {
-  return process.env.MOCK_MODEL === "true" || apiKey === "sk-mock";
+  return getServerEnv("MOCK_MODEL") === "true" || apiKey === "sk-mock";
 }
 
 function mockResearchResult(prompt: string): ResearchResult {
   return {
     answer:
-      "A concept becomes durable when it stops feeling like a definition and starts behaving like a tool [src-1][src-2].\n\nMichelangelo should therefore teach by translation: explain the mechanism plainly, carry it into a concrete scene, then show how the same structure reappears in other domains [src-3]. That is how an abstract idea becomes something a user can notice and reuse.\n\nThe point is not to build a source notebook. The point is to help a conversation accumulate into a sharper mental model, with applications and open questions that keep the idea alive after the turn ends [src-1].",
+      "A concept becomes durable when it stops feeling like a definition and starts behaving like a tool 🧰 [src-1][src-2].\n\nYou can picture the learning arc like this:\nidea -> mechanism -> example -> transfer\n         |                    \\\n         +--> memory ---------> reuse [src-3]\n\nMichelangelo should therefore teach by translation: explain the mechanism plainly, carry it into a concrete scene, then show how the same structure reappears in other domains. That is how an abstract idea becomes something a user can notice and reuse [src-3].\n\nThe point is not to build a source notebook. The point is to help a conversation accumulate into a sharper mental model, with applications and open questions that keep the idea alive after the turn ends [src-1].",
     artifacts: {
       summary: {
         title: prompt.slice(0, 80) || "Research question",

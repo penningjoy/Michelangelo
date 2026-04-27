@@ -34,9 +34,14 @@ const SIDEBAR_STORAGE = "polymath.sidebarOpen";
 
 type WorkspaceProps = {
   hasServerOpenAiKey: boolean;
+  hasServerMockMode: boolean;
 };
 
 type ConceptSpansByMessage = Record<string, ConceptSpanForClient[]>;
+type DatabaseState = {
+  status: "checking" | "ready" | "degraded";
+  reason: string | null;
+};
 
 const STARTER_CONCEPTS = [
   "Entropy",
@@ -60,7 +65,7 @@ const DEPTH_LABEL: Record<ResearchDepth, string> = {
 
 const DEPTHS: ResearchDepth[] = ["quick", "standard", "deep"];
 
-export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
+export function Workspace({ hasServerOpenAiKey, hasServerMockMode }: WorkspaceProps) {
   const [apiKey, setApiKey] = useState("");
   const [draftKey, setDraftKey] = useState("");
   const [session, setSession] = useState<SessionRecord | null>(null);
@@ -83,10 +88,16 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
   const [founderMode, setFounderMode] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarRefreshKey, setSidebarRefreshKey] = useState(0);
+  const [composerMenuOpen, setComposerMenuOpen] = useState(false);
+  const [databaseState, setDatabaseState] = useState<DatabaseState>({
+    status: "checking",
+    reason: null
+  });
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const sourceArchiveRef = useRef<HTMLDivElement | null>(null);
   const settingsInputRef = useRef<HTMLInputElement | null>(null);
+  const composerMenuRef = useRef<HTMLDivElement | null>(null);
   const hydratedRef = useRef(false);
   const currentAssistantIdRef = useRef<string | null>(null);
 
@@ -210,6 +221,64 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [settingsOpen]);
 
+  const refreshDatabaseState = useCallback(async () => {
+    setDatabaseState((current) =>
+      current.status === "ready" ? { status: "checking", reason: null } : current
+    );
+    try {
+      const response = await fetch("/api/db-check", { cache: "no-store" });
+      const payload = (await response.json().catch(() => null)) as
+        | { ok?: boolean; mode?: "postgres" | "memory"; reason?: string; error?: string }
+        | null;
+      if (!response.ok || !payload?.ok || !payload.mode) {
+        setDatabaseState({
+          status: "degraded",
+          reason:
+            payload?.reason ??
+            payload?.error ??
+            "Could not verify Postgres availability. Using in-memory storage."
+        });
+        return true;
+      }
+      setDatabaseState(
+        payload.mode === "postgres"
+          ? { status: "ready", reason: null }
+          : {
+              status: "degraded",
+              reason: payload.reason ?? "Using in-memory storage until Postgres is available."
+            }
+      );
+      return true;
+    } catch {
+      setDatabaseState({
+        status: "degraded",
+        reason: "Could not verify Postgres availability. Using in-memory storage."
+      });
+      return true;
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshDatabaseState();
+  }, [refreshDatabaseState]);
+
+  useEffect(() => {
+    if (!composerMenuOpen) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (composerMenuRef.current?.contains(event.target as Node)) return;
+      setComposerMenuOpen(false);
+    };
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setComposerMenuOpen(false);
+    };
+    window.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [composerMenuOpen]);
+
   const resizeComposer = useCallback(() => {
     const textarea = composerRef.current;
     if (!textarea) return;
@@ -223,8 +292,9 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
     resizeComposer();
   }, [prompt, resizeComposer]);
 
-  const hasUsableKey = apiKey.trim().length > 0 || hasServerOpenAiKey;
-  const canStart = draftKey.trim().length > 0 || hasServerOpenAiKey;
+  const hasServerAccess = hasServerOpenAiKey || hasServerMockMode;
+  const hasUsableKey = apiKey.trim().length > 0 || hasServerAccess;
+  const canStart = draftKey.trim().length > 0 || hasServerAccess;
   const canSaveDraftKey = draftKey.trim().length > 0;
   const canSend = hasUsableKey && prompt.trim().length > 1 && !isSending;
 
@@ -263,6 +333,7 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
     setPrompt("");
     setStatus("");
     setErrorMessage(null);
+    setComposerMenuOpen(false);
     composerRef.current?.focus();
   }, []);
 
@@ -290,9 +361,12 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
   }, [session, titleDraft]);
 
   const submit = useCallback(async () => {
-    if (!canSend) return;
+    if (!hasUsableKey || prompt.trim().length <= 1 || isSending) return;
+    const persistenceReady = await refreshDatabaseState();
+    if (!persistenceReady) return;
     const text = prompt.trim();
     setErrorMessage(null);
+    setComposerMenuOpen(false);
     const optimisticUser: ChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
@@ -374,11 +448,11 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
       setIsSending(false);
       setSentAt(null);
     }
-  }, [apiKey, canSend, prompt, session?.id, depth, founderMode]);
+  }, [apiKey, depth, founderMode, hasUsableKey, isSending, prompt, refreshDatabaseState, session?.id]);
 
   const onComposerKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>) => {
-      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
         event.preventDefault();
         void submit();
       }
@@ -440,7 +514,8 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
           <h1>Open the atelier</h1>
           <p>
             Bring your OpenAI key to start a session. Browser keys stay local unless{" "}
-            <code>OPENAI_API_KEY</code> is already set on the server.
+            <code>OPENAI_API_KEY</code> is already set on the server or <code>MOCK_MODEL=true</code>{" "}
+            is enabled.
           </p>
           <form onSubmit={saveKey} className="key-form">
             <label htmlFor="openai-key">OpenAI API key</label>
@@ -455,7 +530,7 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
             <button disabled={!canStart}>Enter workspace</button>
           </form>
           <p className="fine-print">
-            For local smoke tests, <code>sk-mock</code> skips live model calls.
+            For local smoke tests, use <code>sk-mock</code> or enable <code>MOCK_MODEL=true</code>.
           </p>
         </section>
       </main>
@@ -568,6 +643,15 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
                   </button>
                 </div>
               ) : null}
+
+              {databaseState.status === "degraded" && databaseState.reason ? (
+                <div className="error-banner" role="alert">
+                  <span>{databaseState.reason}</span>
+                  <button type="button" onClick={() => void refreshDatabaseState()}>
+                    Retry
+                  </button>
+                </div>
+              ) : null}
             </div>
 
             <div className="messages" aria-live="polite">
@@ -607,73 +691,78 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
                 <p className="composer-hint">Try a concept, mechanism, question, or contrast.</p>
               ) : null}
               <div className="composer-input-wrap">
-                <details className="composer-menu-wrap">
-                  <summary
+                <div className="composer-menu-wrap" ref={composerMenuRef}>
+                  <button
+                    type="button"
                     className="composer-plus"
                     aria-label="Open prompt settings"
-                    role="button"
+                    aria-expanded={composerMenuOpen}
+                    aria-haspopup="menu"
+                    onClick={() => setComposerMenuOpen((current) => !current)}
                   >
                     +
-                  </summary>
-                  <div className="composer-menu content-card" role="menu" aria-label="Prompt settings">
-                    <section className="composer-menu-section">
-                      <p className="composer-menu-label">Research depth</p>
-                      <div className="depth-toggle" role="group" aria-label="Research depth">
-                        {DEPTHS.map((option) => (
-                          <button
-                            key={option}
-                            type="button"
-                            className={depth === option ? "depth-btn depth-btn--active" : "depth-btn"}
-                            onClick={() => setDepth(option)}
-                            aria-pressed={depth === option}
-                          >
-                            {DEPTH_LABEL[option]}
-                          </button>
-                        ))}
-                      </div>
-                    </section>
-                    <section className="composer-menu-section">
-                      <label className="founder-toggle">
-                        <input
-                          type="checkbox"
-                          checked={founderMode}
-                          onChange={(event) => setFounderMode(event.target.checked)}
-                        />
-                        <span>Founder mode</span>
-                      </label>
-                    </section>
-                    <section className="composer-menu-section">
-                      <div className="composer-menu-row">
-                        <p className="composer-menu-label">Starter prompts</p>
-                        {STARTER_CONCEPTS.length > STARTER_PREVIEW_COUNT ? (
-                          <button
-                            type="button"
-                            className="toolbar-btn toolbar-btn--ghost inline-toggle-btn"
-                            onClick={() => setShowAllStarters((current) => !current)}
-                          >
-                            {showAllStarters ? "Fewer" : "More"}
-                          </button>
-                        ) : null}
-                      </div>
-                      <div className="starter-chips" role="list" aria-label="Starter concept prompts">
-                        {starterConcepts.map((concept) => (
-                          <button
-                            key={concept}
-                            type="button"
-                            className="starter-chip"
-                            role="listitem"
-                            onClick={() => {
-                              setPrompt(`Help me deeply understand ${concept}.`);
-                              composerRef.current?.focus();
-                            }}
-                          >
-                            {concept}
-                          </button>
-                        ))}
-                      </div>
-                    </section>
-                  </div>
-                </details>
+                  </button>
+                  {composerMenuOpen ? (
+                    <div className="composer-menu content-card" role="menu" aria-label="Prompt settings">
+                      <section className="composer-menu-section">
+                        <p className="composer-menu-label">Research depth</p>
+                        <div className="depth-toggle" role="group" aria-label="Research depth">
+                          {DEPTHS.map((option) => (
+                            <button
+                              key={option}
+                              type="button"
+                              className={depth === option ? "depth-btn depth-btn--active" : "depth-btn"}
+                              onClick={() => setDepth(option)}
+                              aria-pressed={depth === option}
+                            >
+                              {DEPTH_LABEL[option]}
+                            </button>
+                          ))}
+                        </div>
+                      </section>
+                      <section className="composer-menu-section">
+                        <label className="founder-toggle">
+                          <input
+                            type="checkbox"
+                            checked={founderMode}
+                            onChange={(event) => setFounderMode(event.target.checked)}
+                          />
+                          <span>Founder mode</span>
+                        </label>
+                      </section>
+                      <section className="composer-menu-section">
+                        <div className="composer-menu-row">
+                          <p className="composer-menu-label">Starter prompts</p>
+                          {STARTER_CONCEPTS.length > STARTER_PREVIEW_COUNT ? (
+                            <button
+                              type="button"
+                              className="toolbar-btn toolbar-btn--ghost inline-toggle-btn"
+                              onClick={() => setShowAllStarters((current) => !current)}
+                            >
+                              {showAllStarters ? "Fewer" : "More"}
+                            </button>
+                          ) : null}
+                        </div>
+                        <div className="starter-chips" role="list" aria-label="Starter concept prompts">
+                          {starterConcepts.map((concept) => (
+                            <button
+                              key={concept}
+                              type="button"
+                              className="starter-chip"
+                              role="listitem"
+                              onClick={() => {
+                                setPrompt(`Help me deeply understand ${concept}.`);
+                                composerRef.current?.focus();
+                              }}
+                            >
+                              {concept}
+                            </button>
+                          ))}
+                        </div>
+                      </section>
+                    </div>
+                  ) : null}
+                </div>
                 <textarea
                   id="research-prompt"
                   ref={composerRef}
@@ -703,7 +792,12 @@ export function Workspace({ hasServerOpenAiKey }: WorkspaceProps) {
               <div className="composer-row">
                 <span className="composer-status">
                   {isSending ? <span className="pulse-dot" aria-hidden /> : null}
-                  {status || "Idle. Press Cmd/Ctrl+Enter to send. ⌘K toggles sessions."}
+                  {status ||
+                    (databaseState.status === "checking"
+                      ? "Checking persistent storage. Send will verify before it runs."
+                      : databaseState.status === "degraded"
+                        ? "Using in-memory storage until Postgres is available."
+                        : "Idle. Press Enter to send. Shift+Enter adds a line. ⌘K toggles sessions.")}
                   {isSending && isLate ? (
                     <span className="composer-late">
                       &nbsp;Taking longer than usual, but the pass is still running.
@@ -801,9 +895,9 @@ function MessageBubble({
       <span className="message-role">{isAssistant ? "Michelangelo" : "You"}</span>
 
       {isThinking ? (
-        <p className="message-body muted">Thinking through the next pass…</p>
+        <div className="message-body muted">Thinking through the next pass…</div>
       ) : (
-        <p className="message-body">
+        <div className="message-body">
           {isAssistant ? (
             <AssistantProse
               text={message.content}
@@ -816,7 +910,7 @@ function MessageBubble({
             message.content
           )}
           {isStreaming ? <span className="stream-cursor" aria-hidden /> : null}
-        </p>
+        </div>
       )}
     </article>
   );
@@ -1251,7 +1345,7 @@ function AssistantProse({
     return pruned;
   }, [text, spans]);
 
-  if (insertions.length === 0) return <>{text}</>;
+  if (insertions.length === 0) return <span className="assistant-prose">{text}</span>;
 
   const nodes: React.ReactNode[] = [];
   let cursor = 0;
@@ -1299,7 +1393,7 @@ function AssistantProse({
   if (cursor < text.length) {
     nodes.push(<span key="tail">{text.slice(cursor)}</span>);
   }
-  return <>{nodes}</>;
+  return <span className="assistant-prose">{nodes}</span>;
 }
 
 function SourceArchive({

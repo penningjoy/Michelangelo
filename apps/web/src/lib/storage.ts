@@ -11,6 +11,7 @@ import type {
   TurnSummary
 } from "./types";
 import type { CompactSummary } from "./schemas";
+import { getServerEnv } from "./serverEnv";
 
 type DbSession = {
   id: string;
@@ -38,7 +39,7 @@ type DbArtifact = {
 };
 
 const memory = {
-  sessions: new Map<string, SessionRecord & { owner: string }>(),
+  sessions: new Map<string, SessionRecord & { owner: string; lastResponseId?: string | null }>(),
   messages: new Map<string, ChatMessage[]>(),
   artifacts: new Map<string, StoredArtifact[]>(),
   turnSummaries: new Map<string, TurnSummary[]>(),
@@ -49,21 +50,36 @@ const memory = {
 let pool: Pool | null = null;
 let schemaReady = false;
 let vectorAvailable = false;
+let storageFallbackReason: string | null = null;
+
+export type DatabaseStatus =
+  | { ok: true; mode: "postgres"; reason: null }
+  | { ok: true; mode: "memory"; reason: string };
 
 export function hasDatabasePublic(): boolean {
-  return hasDatabase();
+  return hasConfiguredDatabase();
 }
 
 export function getPoolIfAvailable(): Pool | null {
-  return hasDatabase() ? getPool() : null;
+  return canUseConfiguredDatabase() ? getPool() : null;
 }
 
 export function hasVectorSupport(): boolean {
-  return vectorAvailable;
+  return canUseConfiguredDatabase() && vectorAvailable;
+}
+
+export async function requireDatabaseStorage(): Promise<void> {
+  if (!hasConfiguredDatabase()) {
+    throw new Error("Postgres is not configured. Set DATABASE_URL or POSTGRES_URL to enable history.");
+  }
+  const ready = await ensureDatabaseAvailable(true);
+  if (!ready) {
+    throw new Error(storageFallbackReason ?? "Postgres is unavailable.");
+  }
 }
 
 export async function createSession(title: string, owner: string): Promise<SessionRecord> {
-  if (!hasDatabase()) {
+  if (!(await canUseDatabase())) {
     const session = {
       id: crypto.randomUUID(),
       title,
@@ -91,7 +107,7 @@ export async function renameSession(
   title: string,
   owner: string
 ): Promise<SessionRecord | null> {
-  if (!hasDatabase()) {
+  if (!(await canUseDatabase())) {
     const current = memory.sessions.get(id);
     if (!current || current.owner !== owner) return null;
     const updated = { ...current, title, updatedAt: new Date().toISOString() };
@@ -108,7 +124,7 @@ export async function renameSession(
 }
 
 export async function listSessions(owner: string, limit = 50): Promise<SessionListItem[]> {
-  if (!hasDatabase()) {
+  if (!(await canUseDatabase())) {
     const sessions = Array.from(memory.sessions.values())
       .filter((session) => session.owner === owner)
       .slice()
@@ -142,7 +158,7 @@ export async function listSessions(owner: string, limit = 50): Promise<SessionLi
 }
 
 export async function getSession(id: string, owner: string): Promise<SessionRecord | null> {
-  if (!hasDatabase()) {
+  if (!(await canUseDatabase())) {
     const session = memory.sessions.get(id);
     return session?.owner === owner ? mapMemorySession(session) : null;
   }
@@ -160,7 +176,7 @@ export async function addMessage(
   role: "user" | "assistant",
   content: string
 ): Promise<ChatMessage> {
-  if (!hasDatabase()) {
+  if (!(await canUseDatabase())) {
     const message = {
       id: crypto.randomUUID(),
       role,
@@ -187,7 +203,7 @@ export async function updateMessageConceptSpans(
   messageId: string,
   spans: ConceptSpanForClient[]
 ): Promise<void> {
-  if (!hasDatabase()) {
+  if (!(await canUseDatabase())) {
     const msgs = memory.messages.get(sessionId);
     if (!msgs) return;
     const idx = msgs.findIndex((m) => m.id === messageId);
@@ -211,7 +227,7 @@ export async function updateMessageConceptSpans(
 }
 
 export async function listMessages(sessionId: string, owner: string): Promise<ChatMessage[]> {
-  if (!hasDatabase()) {
+  if (!(await canUseDatabase())) {
     const session = memory.sessions.get(sessionId);
     return session?.owner === owner ? memory.messages.get(sessionId) ?? [] : [];
   }
@@ -241,7 +257,7 @@ export async function replaceArtifacts(
     updatedAt: new Date().toISOString()
   }));
 
-  if (!hasDatabase()) {
+  if (!(await canUseDatabase())) {
     memory.artifacts.set(sessionId, rows);
     touchMemorySession(sessionId);
     return rows;
@@ -309,7 +325,7 @@ export async function persistTurn(
     for (const label of labels) uniqueLabels.add(label);
   }
 
-  if (!hasDatabase()) {
+  if (!(await canUseDatabase())) {
     memory.artifacts.set(sessionId, artifactRows);
     const existing = memory.turnSummaries.get(sessionId) ?? [];
     memory.turnSummaries.set(sessionId, [...existing.filter((s) => s.turnIndex !== turnIndex), summary]);
@@ -399,7 +415,7 @@ export async function persistTurn(
 }
 
 export async function listTurnSummaries(sessionId: string, owner: string): Promise<TurnSummary[]> {
-  if (!hasDatabase()) {
+  if (!(await canUseDatabase())) {
     const session = memory.sessions.get(sessionId);
     if (session?.owner !== owner) return [];
     return (memory.turnSummaries.get(sessionId) ?? [])
@@ -442,7 +458,7 @@ export async function getLastTurnSummary(sessionId: string, owner: string): Prom
 }
 
 export async function listArtifacts(sessionId: string, owner: string): Promise<StoredArtifact[]> {
-  if (!hasDatabase()) {
+  if (!(await canUseDatabase())) {
     const session = memory.sessions.get(sessionId);
     return session?.owner === owner ? memory.artifacts.get(sessionId) ?? [] : [];
   }
@@ -460,7 +476,7 @@ export async function listArtifacts(sessionId: string, owner: string): Promise<S
 }
 
 export async function listSessionConceptIds(sessionId: string, owner: string): Promise<string[]> {
-  if (!hasDatabase()) {
+  if (!(await canUseDatabase())) {
     const session = memory.sessions.get(sessionId);
     if (session?.owner !== owner) return [];
     return Array.from(
@@ -487,7 +503,7 @@ export async function listConceptsForOwner(
   owner: string,
   limit = 500
 ): Promise<Array<{ id: string; label: string; mentionCount: number }>> {
-  if (!hasDatabase()) {
+  if (!(await canUseDatabase())) {
     const mentionCounts = new Map<string, number>();
     for (const mention of memory.conceptMentions) {
       const session = memory.sessions.get(mention.sessionId);
@@ -530,7 +546,7 @@ export async function listOwnedConceptIds(
   owner: string,
   candidateIds?: string[]
 ): Promise<Set<string>> {
-  if (!hasDatabase()) {
+  if (!(await canUseDatabase())) {
     const concepts = new Set<string>();
     const allow = candidateIds ? new Set(candidateIds) : null;
     for (const mention of memory.conceptMentions) {
@@ -561,11 +577,69 @@ export async function listOwnedConceptIds(
   return new Set(result.rows.map((row) => row.concept_id));
 }
 
-export async function checkDatabase(): Promise<{ ok: boolean; mode: "postgres" | "memory" }> {
-  if (!hasDatabase()) return { ok: true, mode: "memory" };
+/**
+ * Read the OpenAI response.id captured at the end of the previous turn for
+ * this session, if any. Used by the provider to thread `previous_response_id`
+ * so the model keeps server-side conversation state and we can stop re-sending
+ * the transcript on every turn.
+ */
+export async function getLastResponseId(
+  sessionId: string,
+  owner: string
+): Promise<string | null> {
+  if (!(await canUseDatabase())) {
+    const session = memory.sessions.get(sessionId);
+    if (!session || session.owner !== owner) return null;
+    return session.lastResponseId ?? null;
+  }
   await ensureSchema();
-  await getPool().query("select 1");
-  return { ok: true, mode: "postgres" };
+  const result = await getPool().query<{ last_response_id: string | null }>(
+    "select last_response_id from sessions where id = $1 and owner = $2",
+    [sessionId, owner]
+  );
+  return result.rows[0]?.last_response_id ?? null;
+}
+
+/**
+ * Persist the OpenAI response.id from the most recent turn. Called after the
+ * turn is fully persisted so we never thread an id whose context isn't
+ * reflected in our own storage.
+ */
+export async function setLastResponseId(
+  sessionId: string,
+  responseId: string | null
+): Promise<void> {
+  if (!(await canUseDatabase())) {
+    const session = memory.sessions.get(sessionId);
+    if (!session) return;
+    memory.sessions.set(sessionId, { ...session, lastResponseId: responseId });
+    return;
+  }
+  await ensureSchema();
+  await getPool().query("update sessions set last_response_id = $1 where id = $2", [
+    responseId,
+    sessionId
+  ]);
+}
+
+export async function checkDatabase(): Promise<DatabaseStatus> {
+  if (!hasConfiguredDatabase()) {
+    const reason =
+      "Postgres is not configured. Using in-memory storage until DATABASE_URL or POSTGRES_URL is set.";
+    storageFallbackReason = reason;
+    return { ok: true, mode: "memory", reason };
+  }
+
+  const ready = await ensureDatabaseAvailable(true);
+  if (ready) {
+    return { ok: true, mode: "postgres", reason: null };
+  }
+
+  return {
+    ok: true,
+    mode: "memory",
+    reason: storageFallbackReason ?? "Postgres is unavailable. Using in-memory storage."
+  };
 }
 
 async function touchSession(sessionId: string) {
@@ -640,10 +714,20 @@ async function ensureSchema() {
       created_at timestamptz not null default now(),
       primary key(concept_id, session_id, insight_id)
     );
+
+    create table if not exists cache_kv (
+      key text primary key,
+      value jsonb not null,
+      expires_at timestamptz not null
+    );
   `);
   await getPool().query("alter table sessions add column if not exists owner text");
   await getPool().query("update sessions set owner = coalesce(owner, 'legacy-demo')");
   await getPool().query("alter table sessions alter column owner set not null");
+  await getPool().query("alter table sessions add column if not exists last_response_id text");
+  await getPool().query(
+    "create index if not exists cache_kv_expires_idx on cache_kv (expires_at)"
+  );
   await getPool().query(
     "create index if not exists sessions_owner_updated_idx on sessions (owner, updated_at desc)"
   );
@@ -666,24 +750,64 @@ async function ensureSchema() {
   schemaReady = true;
 }
 
-function hasDatabase(): boolean {
-  return Boolean(process.env.POSTGRES_URL || process.env.DATABASE_URL);
+async function canUseDatabase(): Promise<boolean> {
+  if (!hasConfiguredDatabase()) return false;
+  return ensureDatabaseAvailable();
+}
+
+async function ensureDatabaseAvailable(forceRetry = false): Promise<boolean> {
+  if (!hasConfiguredDatabase()) return false;
+  if (!forceRetry && canUseConfiguredDatabase() && schemaReady) return true;
+
+  try {
+    await ensureSchema();
+    await getPool().query("select 1");
+    storageFallbackReason = null;
+    return true;
+  } catch (error) {
+    disableDatabase(asFallbackReason(error));
+    return false;
+  }
+}
+
+function hasConfiguredDatabase(): boolean {
+  return Boolean(getServerEnv("POSTGRES_URL") || getServerEnv("DATABASE_URL"));
+}
+
+function canUseConfiguredDatabase(): boolean {
+  return hasConfiguredDatabase() && !storageFallbackReason;
 }
 
 function getPool(): Pool {
   if (pool) return pool;
-  const connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL;
+  const connectionString = getServerEnv("POSTGRES_URL") || getServerEnv("DATABASE_URL");
   if (!connectionString) {
     throw new Error("POSTGRES_URL or DATABASE_URL is required for Postgres mode.");
   }
   const isLocal = /localhost|127\.0\.0\.1|db:5432/.test(connectionString);
-  const allowInsecureTls = process.env.POSTGRES_SSL_NO_VERIFY === "true";
+  const allowInsecureTls = getServerEnv("POSTGRES_SSL_NO_VERIFY") === "true";
   pool = new Pool({
     connectionString,
     ssl: isLocal ? false : { rejectUnauthorized: !allowInsecureTls },
     max: 3
   });
   return pool;
+}
+
+function disableDatabase(reason: string) {
+  storageFallbackReason = reason;
+  schemaReady = false;
+  vectorAvailable = false;
+  if (!pool) return;
+  const current = pool;
+  pool = null;
+  void current.end().catch(() => undefined);
+}
+
+function asFallbackReason(error: unknown): string {
+  return error instanceof Error
+    ? `Postgres is unavailable. Using in-memory storage instead: ${error.message}`
+    : "Postgres is unavailable. Using in-memory storage instead.";
 }
 
 function mapSession(row: DbSession): SessionRecord {
@@ -735,4 +859,8 @@ export function resetStorageForTests(): void {
   memory.turnSummaries.clear();
   memory.concepts.clear();
   memory.conceptMentions.length = 0;
+  schemaReady = false;
+  vectorAvailable = false;
+  storageFallbackReason = null;
+  pool = null;
 }

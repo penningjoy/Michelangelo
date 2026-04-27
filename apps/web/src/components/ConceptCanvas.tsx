@@ -1,19 +1,9 @@
 "use client";
 
-import dynamic from "next/dynamic";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import * as THREE from "three";
-
-const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), {
-  ssr: false,
-  loading: () => null
-});
-const ForceGraph3D = dynamic(() => import("react-force-graph-3d"), {
-  ssr: false,
-  loading: () => null
-});
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type RelationType =
+  | "co-occurs"
   | "analogous-to"
   | "generalizes"
   | "tension-with"
@@ -31,7 +21,8 @@ type GraphEdge = {
   fromId: string;
   toId: string;
   type: RelationType;
-  status: string;
+  source: "co-occurrence" | "accepted-graph";
+  strength: number;
 };
 
 type Snapshot = {
@@ -39,25 +30,19 @@ type Snapshot = {
   edges: GraphEdge[];
   seedIds?: string[];
   enabled: boolean;
+  source?: "postgres" | "postgres+neo4j" | "unavailable";
+  reason?: string;
 };
 
-type CanvasNode = GraphNode & {
-  x?: number;
-  y?: number;
-  z?: number;
+type PositionedNode = GraphNode & {
+  x: number;
+  y: number;
+  radius: number;
   isSeed: boolean;
 };
 
-type CanvasLink = {
-  source: string;
-  target: string;
-  type: RelationType;
-  edgeId: string;
-};
-
-type ViewMode = "3d" | "2d";
-
-const RELATION_COLOR: Record<RelationType, string> = {
+const RELATION_STROKE: Record<RelationType, string> = {
+  "co-occurs": "rgba(108, 98, 88, 0.48)",
   "analogous-to": "#9b5838",
   generalizes: "#7b492b",
   enables: "#6a513b",
@@ -65,37 +50,26 @@ const RELATION_COLOR: Record<RelationType, string> = {
   contrasts: "#c08a67"
 };
 
-const RELATION_DASH_2D: Record<RelationType, number[] | null> = {
-  "analogous-to": [5, 4],
-  generalizes: null,
-  enables: null,
-  "tension-with": null,
-  contrasts: [4, 4]
+const RELATION_DASH: Partial<Record<RelationType, string>> = {
+  "co-occurs": "5 5",
+  "analogous-to": "5 4",
+  contrasts: "4 4"
 };
 
-const VIEW_STORAGE = "polymath.canvasView";
+const RELATION_LABEL: Record<RelationType, string> = {
+  "co-occurs": "Shared sessions",
+  "analogous-to": "Analogy",
+  generalizes: "Generalizes",
+  enables: "Enables",
+  "tension-with": "Tension",
+  contrasts: "Contrast"
+};
 
-const seedSphereMaterial = new THREE.MeshBasicMaterial({
-  color: 0x8f5533,
-  transparent: true,
-  opacity: 0.92
-});
-const neighborSphereMaterial = new THREE.MeshBasicMaterial({
-  color: 0xb8ab98,
-  transparent: true,
-  opacity: 0.72
-});
-const sphereGeometryCache = new Map<number, THREE.SphereGeometry>();
-
-function getSharedSphereGeometry(radius: number): THREE.SphereGeometry {
-  const key = Math.round(radius * 1000);
-  let geometry = sphereGeometryCache.get(key);
-  if (!geometry) {
-    geometry = new THREE.SphereGeometry(radius, 18, 14);
-    sphereGeometryCache.set(key, geometry);
-  }
-  return geometry;
-}
+const SOURCE_LABEL: Record<NonNullable<Snapshot["source"]>, string> = {
+  postgres: "Session memory",
+  "postgres+neo4j": "Session memory + accepted links",
+  unavailable: "Unavailable"
+};
 
 export function ConceptCanvas({
   sessionId,
@@ -110,23 +84,14 @@ export function ConceptCanvas({
 }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [size, setSize] = useState<{ width: number; height: number }>({ width: 360, height: 280 });
-  const [viewMode, setViewMode] = useState<ViewMode>("2d");
   const [isFetching, setIsFetching] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [pulse, setPulse] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const prevSigRef = useRef<string>("");
-
-  useEffect(() => {
-    const saved = localStorage.getItem(VIEW_STORAGE) as ViewMode | null;
-    if (saved === "2d" || saved === "3d") setViewMode(saved);
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem(VIEW_STORAGE, viewMode);
-  }, [viewMode]);
 
   useEffect(() => {
     const element = wrapperRef.current;
@@ -135,8 +100,8 @@ export function ConceptCanvas({
       for (const entry of entries) {
         const { width } = entry.contentRect;
         setSize({
-          width: Math.max(240, width),
-          height: isExpanded ? 360 : 260
+          width: Math.max(260, width),
+          height: isExpanded ? 380 : 270
         });
       }
     });
@@ -155,13 +120,13 @@ export function ConceptCanvas({
           : "/api/graph-data";
         const response = await fetch(url, { cache: "no-store" });
         if (!response.ok) {
-          if (!cancelled) setFetchError("Could not load the concept map.");
+          if (!cancelled) setFetchError("Could not load the content map.");
           return;
         }
         const data = (await response.json()) as Snapshot;
         if (!cancelled) {
           setSnapshot(data);
-          const sig = `${data.nodes.length}:${data.edges.length}`;
+          const sig = `${data.nodes.length}:${data.edges.length}:${data.source ?? "na"}`;
           if (prevSigRef.current && prevSigRef.current !== sig) {
             setPulse(true);
             window.setTimeout(() => setPulse(false), 1600);
@@ -169,7 +134,7 @@ export function ConceptCanvas({
           prevSigRef.current = sig;
         }
       } catch {
-        if (!cancelled) setFetchError("Could not load the concept map.");
+        if (!cancelled) setFetchError("Could not load the content map.");
       } finally {
         if (!cancelled) setIsFetching(false);
       }
@@ -180,110 +145,55 @@ export function ConceptCanvas({
   }, [sessionId, refreshKey]);
 
   const graphData = useMemo(() => {
-    if (!snapshot) return { nodes: [] as CanvasNode[], links: [] as CanvasLink[] };
+    if (!snapshot) return { nodes: [] as PositionedNode[], edges: [] as GraphEdge[] };
     const seedSet = new Set(snapshot.seedIds ?? []);
-    const nodes: CanvasNode[] = snapshot.nodes.map((node) => {
-      const isSeed = seedSet.has(node.id);
-      return {
-        ...node,
-        isSeed,
-        z: isSeed ? 60 : -24
-      };
-    });
+    const nodes = layoutNodes(snapshot.nodes, seedSet, size.width, size.height);
     const nodeIds = new Set(nodes.map((node) => node.id));
-    const links: CanvasLink[] = snapshot.edges
-      .filter((edge) => nodeIds.has(edge.fromId) && nodeIds.has(edge.toId))
-      .map((edge) => ({
-        source: edge.fromId,
-        target: edge.toId,
-        type: edge.type,
-        edgeId: edge.edgeId
-      }));
-    return { nodes, links };
-  }, [snapshot]);
+    const edges = snapshot.edges.filter(
+      (edge) => nodeIds.has(edge.fromId) && nodeIds.has(edge.toId)
+    );
+    return { nodes, edges };
+  }, [snapshot, size.height, size.width]);
 
-  const nodeCanvasObject2D = useCallback(
-    (raw: object, ctx: CanvasRenderingContext2D, globalScale: number) => {
-      const node = raw as CanvasNode;
-      const x = node.x ?? 0;
-      const y = node.y ?? 0;
-      const radius = 3 + Math.sqrt(Math.max(1, node.mentionCount)) * 1.35;
-
-      ctx.beginPath();
-      ctx.arc(x, y, radius, 0, 2 * Math.PI, false);
-      ctx.fillStyle = node.isSeed ? "#8f5533" : "#c4b8a8";
-      ctx.fill();
-      ctx.strokeStyle = node.isSeed ? "#6d4026" : "#958878";
-      ctx.lineWidth = 0.8 / globalScale;
-      ctx.stroke();
-
-      const fontSize = 10 / globalScale;
-      ctx.font = `500 ${fontSize}px Manrope, -apple-system, sans-serif`;
-      ctx.fillStyle = node.isSeed ? "#31251d" : "#6f6457";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "top";
-      ctx.fillText(node.label.replace(/-/g, " "), x, y + radius + 2 / globalScale);
-    },
-    []
+  const nodeById = useMemo(
+    () => new Map(graphData.nodes.map((node) => [node.id, node])),
+    [graphData.nodes]
   );
 
-  const linkColor = useCallback(
-    (link: object) => RELATION_COLOR[(link as CanvasLink).type] ?? "#b8ab98",
-    []
-  );
-
-  const linkDash2D = useCallback(
-    (link: object) => RELATION_DASH_2D[(link as CanvasLink).type],
-    []
-  );
-
-  const handleNodeClick = useCallback(
-    (raw: object) => {
-      const node = raw as CanvasNode;
-      if (onNodeClick) onNodeClick(node.id);
-    },
-    [onNodeClick]
-  );
-
-  const nodeThreeObject = useCallback((raw: object) => {
-    const node = raw as CanvasNode;
-    const radius = 1.8 + Math.sqrt(Math.max(1, node.mentionCount)) * 0.95;
-    return createNodeMesh(node.label, radius, node.isSeed);
-  }, []);
-
+  const hoveredNode = hoveredNodeId ? nodeById.get(hoveredNodeId) ?? null : null;
+  const sourceLabel = snapshot?.source ? SOURCE_LABEL[snapshot.source] : SOURCE_LABEL.postgres;
   const headerMeta = fetchError
     ? fetchError
-    : curatorWorking
-      ? "Refreshing the latest structure."
-      : `${graphData.nodes.length} concept${graphData.nodes.length === 1 ? "" : "s"}${
-          graphData.links.length > 0
-            ? ` · ${graphData.links.length} link${graphData.links.length === 1 ? "" : "s"}`
-            : ""
-        }`;
+    : snapshot && !snapshot.enabled
+      ? snapshot.reason ?? "Persistence is unavailable."
+      : curatorWorking
+        ? "Refreshing the latest structure."
+        : `${graphData.nodes.length} concept${graphData.nodes.length === 1 ? "" : "s"}${
+            graphData.edges.length > 0
+              ? ` · ${graphData.edges.length} link${graphData.edges.length === 1 ? "" : "s"}`
+              : ""
+          } · ${sourceLabel}`;
 
   if (snapshot && !snapshot.enabled) {
     return (
       <section className="shell-panel reference-panel concept-canvas concept-canvas--disabled">
         <header className="panel-header">
           <div>
-            <p className="eyebrow">Concept map</p>
-            <h2 className="panel-title">Graph offline</h2>
+            <p className="eyebrow">Content map</p>
+            <h2 className="panel-title">Persistence unavailable</h2>
           </div>
         </header>
-        <p className="panel-note">
-          Neo4j is unavailable. Start the graph service and refresh when you want the supporting
-          map back.
-        </p>
+        <p className="panel-note">{snapshot.reason ?? "Postgres must be available to build the map."}</p>
       </section>
     );
   }
 
   return (
     <section className="shell-panel reference-panel concept-canvas" ref={wrapperRef}>
-        <header className="panel-header concept-canvas-header">
+      <header className="panel-header concept-canvas-header">
         <div>
           <p className="eyebrow">
-            Concept map
+            Content map
             {(isFetching || curatorWorking) && !fetchError ? (
               <span className="pulse-dot" aria-hidden title="Refreshing" />
             ) : null}
@@ -294,71 +204,53 @@ export function ConceptCanvas({
 
         <div className="concept-canvas-controls">
           {!isCollapsed ? (
-            <>
-              <div className="view-toggle" role="group" aria-label="View mode">
-                <button
-                  type="button"
-                  className={viewMode === "2d" ? "view-toggle-btn active" : "view-toggle-btn"}
-                  onClick={() => setViewMode("2d")}
-                >
-                  2D
-                </button>
-                <button
-                  type="button"
-                  className={viewMode === "3d" ? "view-toggle-btn active" : "view-toggle-btn"}
-                  onClick={() => setViewMode("3d")}
-                >
-                  3D
-                </button>
-              </div>
-              <button
-                className="toolbar-btn toolbar-btn--ghost concept-canvas-icon-btn"
-                type="button"
-                onClick={() => setIsExpanded((value) => !value)}
-                aria-label={isExpanded ? "Compact map" : "Expand map"}
-                title={isExpanded ? "Compact map" : "Expand map"}
-              >
-                {isExpanded ? (
-                  <svg viewBox="0 0 24 24" aria-hidden>
-                    <path
-                      d="M9 3H3v6M15 3h6v6M21 15v6h-6M9 21H3v-6"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.6"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                    <path
-                      d="M8 8L3 3M16 8l5-5M8 16l-5 5M16 16l5 5"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.6"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                ) : (
-                  <svg viewBox="0 0 24 24" aria-hidden>
-                    <path
-                      d="M8 3H3v5M21 8V3h-5M16 21h5v-5M3 16v5h5"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.6"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                    <path
-                      d="M3 3l5 5M21 3l-5 5M21 21l-5-5M3 21l5-5"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.6"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                )}
-              </button>
-            </>
+            <button
+              className="toolbar-btn toolbar-btn--ghost concept-canvas-icon-btn"
+              type="button"
+              onClick={() => setIsExpanded((value) => !value)}
+              aria-label={isExpanded ? "Compact map" : "Expand map"}
+              title={isExpanded ? "Compact map" : "Expand map"}
+            >
+              {isExpanded ? (
+                <svg viewBox="0 0 24 24" aria-hidden>
+                  <path
+                    d="M9 3H3v6M15 3h6v6M21 15v6h-6M9 21H3v-6"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d="M8 8L3 3M16 8l5-5M8 16l-5 5M16 16l5 5"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 24 24" aria-hidden>
+                  <path
+                    d="M8 3H3v5M21 8V3h-5M16 21h5v-5M3 16v5h5"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d="M3 3l5 5M21 3l-5 5M21 21l-5-5M3 21l5-5"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              )}
+            </button>
           ) : null}
           <button
             className="toolbar-btn toolbar-btn--ghost concept-canvas-icon-btn"
@@ -418,20 +310,16 @@ export function ConceptCanvas({
       {isCollapsed ? (
         <div className="concept-canvas-collapsed">
           <div className="concept-canvas-preview">
-            <p>Keep the map tucked away until you need a structural view.</p>
+            <p>Keep the map tucked away until you need the bigger picture.</p>
             <div className="concept-canvas-stats" aria-hidden>
               <span>{graphData.nodes.length} concepts</span>
-              <span>{graphData.links.length} links</span>
+              <span>{graphData.edges.length} links</span>
             </div>
           </div>
         </div>
       ) : graphData.nodes.length === 0 ? (
         <div className="concept-canvas-empty">
-          <svg
-            className="concept-canvas-silhouette"
-            viewBox="0 0 200 110"
-            aria-hidden
-          >
+          <svg className="concept-canvas-silhouette" viewBox="0 0 200 110" aria-hidden>
             <line x1="40" y1="55" x2="100" y2="32" />
             <line x1="100" y1="32" x2="160" y2="58" />
             <line x1="40" y1="55" x2="100" y2="86" />
@@ -442,7 +330,7 @@ export function ConceptCanvas({
             <circle cx="160" cy="58" r="8" />
             <circle cx="100" cy="86" r="7" />
           </svg>
-          <p>Run a few turns and accept connections. The map will settle here.</p>
+          <p>Run a few turns and the map will begin to connect repeated ideas.</p>
         </div>
       ) : (
         <div
@@ -454,95 +342,180 @@ export function ConceptCanvas({
             .filter(Boolean)
             .join(" ")}
         >
-          {viewMode === "3d" ? (
-            <ForceGraph3D
-              graphData={graphData}
-              width={size.width}
-              height={size.height}
-              backgroundColor="rgba(0,0,0,0)"
-              showNavInfo={false}
-              nodeThreeObject={nodeThreeObject}
-              linkColor={linkColor}
-              linkOpacity={0.45}
-              linkWidth={0.45}
-              linkCurvature={0.06}
-              onNodeClick={handleNodeClick}
-              cooldownTicks={80}
-              warmupTicks={18}
-              d3AlphaDecay={0.04}
-              d3VelocityDecay={0.38}
-            />
-          ) : (
-            <ForceGraph2D
-              graphData={graphData}
-              width={size.width}
-              height={size.height}
-              backgroundColor="rgba(0,0,0,0)"
-              nodeCanvasObject={nodeCanvasObject2D}
-              nodePointerAreaPaint={(raw: object, color: string, ctx: CanvasRenderingContext2D) => {
-                const node = raw as CanvasNode;
-                const radius = 3 + Math.sqrt(Math.max(1, node.mentionCount)) * 1.35;
-                ctx.fillStyle = color;
-                ctx.beginPath();
-                ctx.arc(node.x ?? 0, node.y ?? 0, radius + 5, 0, 2 * Math.PI);
-                ctx.fill();
+          <svg
+            viewBox={`0 0 ${size.width} ${size.height}`}
+            className="concept-canvas-svg"
+            role="img"
+            aria-label="2D concept map"
+          >
+            {graphData.edges.map((edge) => {
+              const from = nodeById.get(edge.fromId);
+              const to = nodeById.get(edge.toId);
+              if (!from || !to) return null;
+              return (
+                <line
+                  key={edge.edgeId}
+                  x1={from.x}
+                  y1={from.y}
+                  x2={to.x}
+                  y2={to.y}
+                  stroke={RELATION_STROKE[edge.type]}
+                  strokeOpacity={edge.source === "accepted-graph" ? 0.9 : 0.62}
+                  strokeWidth={edge.source === "accepted-graph" ? 2.1 : 1.25 + edge.strength * 0.12}
+                  strokeDasharray={RELATION_DASH[edge.type]}
+                />
+              );
+            })}
+
+            {graphData.nodes.map((node) => (
+              <g
+                key={node.id}
+                className="concept-canvas-node"
+                transform={`translate(${node.x} ${node.y})`}
+                onMouseEnter={() => setHoveredNodeId(node.id)}
+                onMouseLeave={() => setHoveredNodeId((current) => (current === node.id ? null : current))}
+                onFocus={() => setHoveredNodeId(node.id)}
+                onBlur={() => setHoveredNodeId((current) => (current === node.id ? null : current))}
+                onClick={() => onNodeClick?.(node.id)}
+                role={onNodeClick ? "button" : undefined}
+                tabIndex={0}
+              >
+                <circle
+                  r={node.radius + (node.isSeed ? 4 : 0)}
+                  fill={node.isSeed ? "rgba(138, 77, 47, 0.13)" : "transparent"}
+                />
+                <circle
+                  r={node.radius}
+                  fill={node.isSeed ? "#8f5533" : "#f7ecde"}
+                  stroke={node.isSeed ? "#6d4026" : "#a89785"}
+                  strokeWidth={node.isSeed ? 2.2 : 1.4}
+                />
+                <text
+                  y={node.radius + 16}
+                  textAnchor="middle"
+                  className={node.isSeed ? "concept-canvas-label concept-canvas-label--seed" : "concept-canvas-label"}
+                >
+                  {node.label.replace(/-/g, " ")}
+                </text>
+              </g>
+            ))}
+          </svg>
+
+          <div className="concept-canvas-legend" aria-hidden>
+            <span className="concept-canvas-legend-chip concept-canvas-legend-chip--seed">
+              Current thread
+            </span>
+            <span className="concept-canvas-legend-chip">Session memory</span>
+          </div>
+
+          {hoveredNode ? (
+            <div
+              className="content-card concept-canvas-tooltip"
+              style={{
+                left: `${Math.min(size.width - 190, Math.max(12, hoveredNode.x - 80))}px`,
+                top: `${Math.min(size.height - 96, Math.max(12, hoveredNode.y + hoveredNode.radius + 14))}px`
               }}
-              linkColor={linkColor}
-              linkLineDash={linkDash2D}
-              linkWidth={0.9}
-              onNodeClick={handleNodeClick}
-              cooldownTicks={80}
-              warmupTicks={24}
-              d3AlphaDecay={0.035}
-              d3VelocityDecay={0.35}
-            />
-          )}
+            >
+              <p className="eyebrow">{hoveredNode.isSeed ? "Current thread" : "Related memory"}</p>
+              <h3>{hoveredNode.label.replace(/-/g, " ")}</h3>
+              <p>
+                Mentioned {hoveredNode.mentionCount} time{hoveredNode.mentionCount === 1 ? "" : "s"}.
+              </p>
+            </div>
+          ) : null}
+
+          <div className="concept-canvas-edge-list">
+            {graphData.edges.slice(0, 4).map((edge) => (
+              <span key={`edge-pill-${edge.edgeId}`} className="concept-canvas-edge-pill">
+                {RELATION_LABEL[edge.type]}
+              </span>
+            ))}
+          </div>
         </div>
       )}
     </section>
   );
 }
 
-function createNodeMesh(label: string, radius: number, isSeed: boolean): THREE.Object3D {
-  const group = new THREE.Group();
+function layoutNodes(
+  nodes: GraphNode[],
+  seedSet: Set<string>,
+  width: number,
+  height: number
+): PositionedNode[] {
+  const seeds = nodes
+    .filter((node) => seedSet.has(node.id))
+    .sort((a, b) => b.mentionCount - a.mentionCount || a.label.localeCompare(b.label));
+  const others = nodes
+    .filter((node) => !seedSet.has(node.id))
+    .sort((a, b) => b.mentionCount - a.mentionCount || a.label.localeCompare(b.label));
 
-  const sphereGeometry = getSharedSphereGeometry(radius);
-  const sphereMaterial = isSeed ? seedSphereMaterial : neighborSphereMaterial;
-  const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
-  group.add(sphere);
+  const placed: PositionedNode[] = [];
+  const centerX = width / 2;
+  const centerY = height / 2 - 6;
 
-  const sprite = makeTextSprite(label.replace(/-/g, " "), isSeed);
-  sprite.position.set(0, radius + 2.1, 0);
-  group.add(sprite);
+  if (seeds.length === 1) {
+    placed.push(positionNode(seeds[0], centerX, centerY - 10, true));
+  } else if (seeds.length > 1) {
+    placed.push(
+      ...placeRing(
+        seeds,
+        centerX,
+        centerY - 8,
+        Math.min(width * 0.18, 88),
+        Math.min(height * 0.15, 58),
+        true
+      )
+    );
+  }
 
-  return group;
+  const chunks = chunkArray(others, isDense(others.length) ? 10 : 8);
+  chunks.forEach((chunk, index) => {
+    const xRadius = Math.min(width * (0.28 + index * 0.08), 110 + index * 46);
+    const yRadius = Math.min(height * (0.22 + index * 0.08), 80 + index * 34);
+    placed.push(...placeRing(chunk, centerX, centerY + 8, xRadius, yRadius, false));
+  });
+
+  return placed;
 }
 
-function makeTextSprite(text: string, isSeed: boolean): THREE.Object3D {
-  const canvas = document.createElement("canvas");
-  const ctx = canvas.getContext("2d");
-  if (!ctx) {
-    return new THREE.Object3D();
+function placeRing(
+  nodes: GraphNode[],
+  centerX: number,
+  centerY: number,
+  radiusX: number,
+  radiusY: number,
+  isSeed: boolean
+): PositionedNode[] {
+  if (nodes.length === 0) return [];
+  if (nodes.length === 1) {
+    return [positionNode(nodes[0], centerX, centerY, isSeed)];
   }
-  const fontSize = 34;
-  ctx.font = `500 ${fontSize}px Manrope, -apple-system, sans-serif`;
-  const metrics = ctx.measureText(text);
-  const padding = 12;
-  canvas.width = Math.ceil(metrics.width + padding * 2);
-  canvas.height = fontSize + padding * 2;
 
-  ctx.font = `500 ${fontSize}px Manrope, -apple-system, sans-serif`;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillStyle = isSeed ? "#2f251e" : "#6f6457";
-  ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+  return nodes.map((node, index) => {
+    const angle = -Math.PI / 2 + (index / nodes.length) * Math.PI * 2;
+    return positionNode(
+      node,
+      centerX + Math.cos(angle) * radiusX,
+      centerY + Math.sin(angle) * radiusY,
+      isSeed
+    );
+  });
+}
 
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.needsUpdate = true;
-  const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
-  const sprite = new THREE.Sprite(material);
-  const aspect = canvas.width / canvas.height;
-  const scale = 5.4;
-  sprite.scale.set(scale * aspect, scale, 1);
-  return sprite;
+function positionNode(node: GraphNode, x: number, y: number, isSeed: boolean): PositionedNode {
+  const radius = Math.max(isSeed ? 12 : 10, Math.min(22, 8 + Math.sqrt(Math.max(1, node.mentionCount)) * 2.1));
+  return { ...node, x, y, radius, isSeed };
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function isDense(count: number): boolean {
+  return count > 10;
 }
